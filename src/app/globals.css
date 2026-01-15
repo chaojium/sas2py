@@ -1,0 +1,62 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f8f4ee;
+  --foreground: #1e1b16;
+  --primary: #ff6a3d;
+  --secondary: #0f766e;
+  --card: #fffaf4;
+  --border: #e2d7c6;
+  --muted: #6b6257;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-display);
+  --font-mono: var(--font-mono);
+}
+
+body {
+  background:
+    radial-gradient(circle at top left, #ffe7d4 0%, transparent 45%),
+    radial-gradient(circle at 80% 10%, #c7f0ea 0%, transparent 35%),
+    linear-gradient(135deg, #f8f4ee 0%, #f5efe7 100%);
+  color: var(--foreground);
+  font-family: var(--font-display), system-ui, sans-serif;
+  min-height: 100vh;
+}
+
+.glass-card {
+  background: color-mix(in oklab, var(--card) 92%, white 8%);
+  border: 1px solid var(--border);
+  box-shadow: 0 24px 50px -30px rgba(30, 27, 22, 0.4);
+}
+
+.grain {
+  position: relative;
+}
+
+.grain::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg width='120' height='120' viewBox='0 0 120 120' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)' opacity='0.06'/%3E%3C/svg%3E");
+  pointer-events: none;
+  mix-blend-mode: multiply;
+}
+
+.fade-up {
+  animation: fadeUp 600ms ease both;
+}
+
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
