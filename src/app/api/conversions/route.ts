@@ -9,6 +9,8 @@ import {
 } from "@/lib/codex";
 import { randomUUID } from "node:crypto";
 
+export const runtime = "nodejs";
+
 export async function GET(request: Request) {
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) {
