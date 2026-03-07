@@ -5,7 +5,7 @@ import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 
 type CodeBlockProps = {
   code: string;
-  language: "python" | "sas" | "r";
+  language: "python" | "sas" | "r" | "text";
   maxHeight?: number;
 };
 
