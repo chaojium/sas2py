@@ -15,7 +15,7 @@ if (!host || !path || !token) {
 
 const client = new DBSQLClient();
 
-let connectionPromise: Promise<ReturnType<typeof client.connect>> | null = null;
+let connectionPromise: ReturnType<typeof client.connect> | null = null;
 
 async function getConnection() {
   if (!connectionPromise) {
