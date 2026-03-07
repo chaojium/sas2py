@@ -23,13 +23,13 @@ export default function Hero() {
           Transform SAS logic into clean Python, then review with context.
         </h1>
         {/* <p className="text-lg text-[var(--muted)]">
-          Codex CLI handles the translation. You control the output, capture
+          GPT-5.2 handles the translation. You control the output, capture
           feedback, and keep everything stored in Postgres for traceability.
         </p> */}
       </div>
       <div className="flex flex-wrap gap-4 text-sm text-[var(--muted)]">
         <span className="rounded-full border border-[var(--border)] px-4 py-2">
-          Codex-powered conversion
+          GPT-5.2-powered conversion
         </span>
         <span className="rounded-full border border-[var(--border)] px-4 py-2">
           Review notes + ratings

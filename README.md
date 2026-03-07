@@ -1,10 +1,10 @@
 # SAS2Py Studio
 
-Convert SAS scripts to Python or R with Codex CLI, then keep a review trail in Databricks SQL behind NextAuth.
+Convert SAS scripts to Python or R with OpenAI GPT-5.2, then keep a review trail in Databricks SQL behind NextAuth.
 
 ## Features
 
-- Codex CLI conversion
+- GPT-5.2 conversion
 - NextAuth-secured workspace
 - Databricks SQL storage for SAS and converted code
 - Review notes and ratings per conversion
@@ -83,9 +83,13 @@ CREATE TABLE IF NOT EXISTS sas2py.prod.code_runs (
 );
 ```
 
-## Codex CLI
+## OpenAI API
 
-Set `CODEX_CLI_COMMAND` and `CODEX_CLI_ARGS` in `.env`. The app sends the SAS prompt over stdin.
+Set these in `.env`:
+
+- `OPENAI_API_KEY`
+- `OPENAI_MODEL` (default: `gpt-5.2`)
+- `OPENAI_TIMEOUT_MS` (default: `90000`)
 
 ## Auth
 
@@ -108,7 +112,7 @@ docker run --rm -p 3000:3000 --env-file .env sas2py:latest
 Notes:
 
 - The app reads runtime configuration from `.env`.
-- Conversion endpoints call the `codex` CLI from the backend process. Ensure the container image has Codex CLI installed and authenticated, or override `CODEX_CLI_COMMAND` to a command available in the container.
+- Conversion endpoints call OpenAI Responses API from the backend process.
 - Code execution endpoints call Databricks Jobs from the backend process.
 
 ## Databricks Jobs Code Runner

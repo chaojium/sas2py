@@ -1,30 +1,84 @@
 import "server-only";
-import { spawn } from "node:child_process";
-
+import OpenAI from "openai";
 const DEFAULT_TIMEOUT_MS = 90_000;
+const DEFAULT_OPENAI_MODEL = "gpt-5.2";
 
-function buildCommand() {
-  const command = process.env.CODEX_CLI_COMMAND || "codex";
-  const script = process.env.CODEX_CLI_SCRIPT;
-  const rawArgs = process.env.CODEX_CLI_ARGS || "";
-  const requireLogin = process.env.CODEX_REQUIRE_LOGIN === "true";
-  const mode = process.env.CODEX_MODE || "exec";
-  const args = rawArgs
-    .split(" ")
-    .map((part) => part.trim())
-    .filter(Boolean);
+type OpenAIResponse = {
+  output_text?: string;
+  output?: Array<{
+    content?: Array<{
+      type?: string;
+      text?: string;
+    }>;
+  }>;
+  error?: {
+    message?: string;
+  };
+};
 
-  if (requireLogin && !args.includes("--login")) {
-    args.unshift("--login");
+function getApiConfig() {
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) {
+    throw new Error("Missing OPENAI_API_KEY.");
+  }
+  const model = process.env.OPENAI_MODEL?.trim() || DEFAULT_OPENAI_MODEL;
+  const timeoutMs = Number(process.env.OPENAI_TIMEOUT_MS || DEFAULT_TIMEOUT_MS);
+  return { apiKey, model, timeoutMs };
+}
+
+function extractOutputText(payload: OpenAIResponse) {
+  if (payload.output_text?.trim()) {
+    return payload.output_text.trim();
   }
 
-  const modeArgs = mode ? [mode, "-"] : [];
-  const finalArgs = script ? [script, ...modeArgs, ...args] : [...modeArgs, ...args];
-  return { command, args: finalArgs };
+  const chunks: string[] = [];
+  for (const item of payload.output || []) {
+    for (const content of item.content || []) {
+      if (content.type === "output_text" || content.type === "text") {
+        if (content.text?.trim()) {
+          chunks.push(content.text.trim());
+        }
+      }
+    }
+  }
+  return chunks.join("\n").trim();
+}
+
+async function generateWithOpenAI(prompt: string) {
+  const { apiKey, model, timeoutMs } = getApiConfig();
+  const client = new OpenAI({
+    apiKey,
+    timeout: timeoutMs,
+  });
+
+  try {
+    const response = await client.responses.create({
+      model,
+      input: [
+        {
+          role: "user",
+          content: [{ type: "input_text", text: prompt }],
+        },
+      ],
+    });
+    const payload = response as OpenAIResponse;
+    const output = extractOutputText(payload);
+    if (!output) {
+      throw new Error("OpenAI API returned empty output.");
+    }
+    return output;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.name === "AbortError" || error.message.toLowerCase().includes("timeout"))
+    ) {
+      throw new Error("OpenAI request timed out.");
+    }
+    throw error;
+  }
 }
 
 export async function convertSasToPython(sasCode: string) {
-  const { command, args } = buildCommand();
   const prompt = [
     "Convert the following SAS code to idiomatic, production-ready Python.",
     "Use pandas where needed and preserve logic and comments.",
@@ -32,55 +86,10 @@ export async function convertSasToPython(sasCode: string) {
     "",
     sasCode,
   ].join("\n");
-
-  return new Promise<string>((resolve, reject) => {
-    const child = spawn(command, args, {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error("Codex CLI timed out."));
-    }, Number(process.env.CODEX_TIMEOUT_MS || DEFAULT_TIMEOUT_MS));
-
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code !== 0) {
-        reject(
-          new Error(
-            stderr || `Codex CLI failed with exit code ${code ?? "unknown"}.`,
-          ),
-        );
-        return;
-      }
-      const output = stdout.trim();
-      if (!output) {
-        reject(new Error("Codex CLI returned empty output."));
-        return;
-      }
-      resolve(output);
-    });
-
-    child.stdin.write(prompt);
-    child.stdin.end();
-  });
+  return generateWithOpenAI(prompt);
 }
 
 export async function convertSasToR(sasCode: string) {
-  const { command, args } = buildCommand();
   const prompt = [
     "Convert the following SAS code to idiomatic, production-ready R.",
     "Use tidyverse or data.table where appropriate and preserve logic and comments.",
@@ -88,51 +97,7 @@ export async function convertSasToR(sasCode: string) {
     "",
     sasCode,
   ].join("\n");
-
-  return new Promise<string>((resolve, reject) => {
-    const child = spawn(command, args, {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error("Codex CLI timed out."));
-    }, Number(process.env.CODEX_TIMEOUT_MS || DEFAULT_TIMEOUT_MS));
-
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code !== 0) {
-        reject(
-          new Error(
-            stderr || `Codex CLI failed with exit code ${code ?? "unknown"}.`,
-          ),
-        );
-        return;
-      }
-      const output = stdout.trim();
-      if (!output) {
-        reject(new Error("Codex CLI returned empty output."));
-        return;
-      }
-      resolve(output);
-    });
-
-    child.stdin.write(prompt);
-    child.stdin.end();
-  });
+  return generateWithOpenAI(prompt);
 }
 
 export async function refineConversion(
@@ -141,7 +106,6 @@ export async function refineConversion(
   instruction: string,
   language: "PYTHON" | "R",
 ) {
-  const { command, args } = buildCommand();
   const target = language === "R" ? "R" : "Python";
   const prompt = [
     `You are improving an existing SAS to ${target} conversion.`,
@@ -157,49 +121,5 @@ export async function refineConversion(
     `Current ${target} conversion:`,
     convertedCode,
   ].join("\n");
-
-  return new Promise<string>((resolve, reject) => {
-    const child = spawn(command, args, {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error("Codex CLI timed out."));
-    }, Number(process.env.CODEX_TIMEOUT_MS || DEFAULT_TIMEOUT_MS));
-
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code !== 0) {
-        reject(
-          new Error(
-            stderr || `Codex CLI failed with exit code ${code ?? "unknown"}.`,
-          ),
-        );
-        return;
-      }
-      const output = stdout.trim();
-      if (!output) {
-        reject(new Error("Codex CLI returned empty output."));
-        return;
-      }
-      resolve(output);
-    });
-
-    child.stdin.write(prompt);
-    child.stdin.end();
-  });
+  return generateWithOpenAI(prompt);
 }

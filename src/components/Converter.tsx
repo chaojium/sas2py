@@ -410,7 +410,7 @@ export default function Converter() {
                 disabled={!canConvert}
                 className="rounded-full bg-[var(--primary)] px-6 py-2.5 text-sm font-semibold text-white transition hover:translate-y-[-1px] disabled:cursor-not-allowed disabled:opacity-50"
               >
-              {loading ? "Running Codex..." : "Convert"}
+              {loading ? "Running GPT-5.2..." : "Convert"}
             </button>
               <button
                 onClick={() => setSasCode("")}
@@ -449,7 +449,7 @@ export default function Converter() {
             <CodeBlock
               code={
                 pythonCode ||
-                `Your converted ${language === "R" ? "R" : "Python"} will appear here once Codex finishes the translation.`
+                `Your converted ${language === "R" ? "R" : "Python"} will appear here once GPT-5.2 finishes the translation.`
               }
               language={language === "R" ? "r" : "python"}
               maxHeight={320}

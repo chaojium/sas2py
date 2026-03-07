@@ -170,13 +170,13 @@ export async function POST(request: Request) {
       },
     });
   } catch (error) {
-    console.error("Codex conversion failed:", error);
+    console.error("OpenAI conversion failed:", error);
     return NextResponse.json(
       {
         error:
           error instanceof Error
             ? error.message
-            : "Codex conversion failed.",
+            : "OpenAI conversion failed.",
         details:
           process.env.NODE_ENV === "development" && error instanceof Error
             ? error.stack
@@ -247,13 +247,13 @@ export async function PATCH(request: Request) {
       },
     });
   } catch (error) {
-    console.error("Codex refinement failed:", error);
+    console.error("OpenAI refinement failed:", error);
     return NextResponse.json(
       {
         error:
           error instanceof Error
             ? error.message
-            : "Codex refinement failed.",
+            : "OpenAI refinement failed.",
         details:
           process.env.NODE_ENV === "development" && error instanceof Error
             ? error.stack

@@ -16,7 +16,7 @@ const jetBrainsMono = JetBrains_Mono({
 
 export const metadata: Metadata = {
   title: "SAS2Py Studio",
-  description: "Convert SAS code to Python with Codex, review, and collaborate.",
+  description: "Convert SAS code to Python or R with GPT-5.2, review, and collaborate.",
 };
 
 export default function RootLayout({
