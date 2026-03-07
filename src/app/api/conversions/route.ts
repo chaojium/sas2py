@@ -57,6 +57,31 @@ export async function GET(request: Request) {
     {},
   );
 
+  let runs: Record<string, unknown>[] = [];
+  if (entryIds.length > 0) {
+    try {
+      runs = await execute<Record<string, unknown>>(
+        `SELECT id, code_entry_id, language, stdout, stderr, exit_code, timed_out, duration_ms, detected_packages, policy_mode, created_at
+         FROM ${table("code_runs")}
+         WHERE code_entry_id IN (${entryIds.map(() => "?").join(",")})
+         ORDER BY created_at DESC`,
+        entryIds,
+      );
+    } catch (error) {
+      console.warn("Skipping code run history query:", error);
+    }
+  }
+
+  const runsByEntry = runs.reduce<Record<string, Record<string, unknown>[]>>(
+    (acc, run) => {
+      const entryId = run.code_entry_id as string;
+      acc[entryId] = acc[entryId] || [];
+      acc[entryId].push(run);
+      return acc;
+    },
+    {},
+  );
+
   const formattedEntries = entries.map((entry) => ({
     id: entry.id,
     userId: entry.user_id,
@@ -75,6 +100,21 @@ export async function GET(request: Request) {
         name: null,
         email: null,
       },
+    })),
+    runs: (runsByEntry[entry.id as string] || []).map((run) => ({
+      id: run.id,
+      language: run.language,
+      stdout: run.stdout,
+      stderr: run.stderr,
+      exitCode: run.exit_code,
+      timedOut: run.timed_out,
+      durationMs: run.duration_ms,
+      detectedPackages: String(run.detected_packages || "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean),
+      policyMode: run.policy_mode,
+      createdAt: run.created_at,
     })),
   }));
 

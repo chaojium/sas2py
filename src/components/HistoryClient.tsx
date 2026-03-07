@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useSession } from "next-auth/react";
 import Link from "next/link";
 import AuthButton from "@/components/AuthButton";
@@ -13,6 +13,15 @@ type Entry = {
   sasCode: string;
   pythonCode: string;
   createdAt: string;
+  runs: {
+    id: string;
+    exitCode: number | null;
+    timedOut: boolean;
+    durationMs: number;
+    detectedPackages: string[];
+    policyMode: string;
+    createdAt: string;
+  }[];
 };
 
 export default function HistoryClient() {
@@ -23,20 +32,28 @@ export default function HistoryClient() {
   const [query, setQuery] = useState("");
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
 
-  const fetchEntries = async (search?: string) => {
+  const fetchEntries = useCallback(async (search?: string, showLoading = true) => {
     if (!isAuthed) return;
-    setLoading(true);
+    if (showLoading) {
+      setLoading(true);
+    }
     const url = search
       ? `/api/conversions?search=${encodeURIComponent(search)}`
       : "/api/conversions";
     const response = await fetch(url);
     const data = await response.json();
     setEntries(response.ok ? data.entries || [] : []);
-    setLoading(false);
-  };
+    if (showLoading) {
+      setLoading(false);
+    }
+  }, [isAuthed]);
 
   useEffect(() => {
-    fetchEntries();
+    if (!isAuthed) return;
+    fetch("/api/conversions")
+      .then((response) => response.json())
+      .then((data) => setEntries(data.entries || []))
+      .catch(() => setEntries([]));
   }, [isAuthed]);
 
   if (!isAuthed) {
@@ -88,7 +105,7 @@ export default function HistoryClient() {
         <button
           onClick={() => {
             setQuery("");
-            fetchEntries("");
+            void fetchEntries("");
           }}
           className="rounded-full border border-[var(--border)] px-4 py-2 text-sm text-[var(--muted)] transition hover:bg-white/70"
         >
@@ -125,33 +142,67 @@ export default function HistoryClient() {
                   </span>
                 </div>
                 {expandedIds[entry.id] ? (
-                  <div className="mt-4 grid gap-4 md:grid-cols-2">
-                  <div>
-                    <h4 className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
-                      SAS Source
-                    </h4>
-                    <div className="mt-2">
-                      <CodeBlock
-                        code={entry.sasCode}
-                        language="sas"
-                        maxHeight={256}
-                      />
+                  <div className="mt-4 space-y-4">
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div>
+                        <h4 className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
+                          SAS Source
+                        </h4>
+                        <div className="mt-2">
+                          <CodeBlock
+                            code={entry.sasCode}
+                            language="sas"
+                            maxHeight={256}
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
+                          {entry.language === "R" ? "R Output" : "Python Output"}
+                        </h4>
+                        <div className="mt-2">
+                          <CodeBlock
+                            code={entry.pythonCode}
+                            language={entry.language === "R" ? "r" : "python"}
+                            maxHeight={256}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
+                        Executions
+                      </h4>
+                      <div className="mt-2 space-y-2">
+                        {entry.runs.length === 0 ? (
+                          <p className="text-sm text-[var(--muted)]">
+                            No executions recorded.
+                          </p>
+                        ) : (
+                          entry.runs.slice(0, 5).map((run) => (
+                            <div
+                              key={run.id}
+                              className="rounded-xl border border-[var(--border)] bg-white/70 p-3 text-sm"
+                            >
+                              <p className="text-xs text-[var(--muted)]">
+                                {new Date(run.createdAt).toLocaleString()} | exit{" "}
+                                {run.exitCode ?? "unknown"} | {run.durationMs}ms
+                                {run.timedOut ? " | timed out" : ""} | policy:{" "}
+                                {run.policyMode}
+                              </p>
+                              <p className="mt-1 text-xs text-[var(--muted)]">
+                                packages:{" "}
+                                {run.detectedPackages.length > 0
+                                  ? run.detectedPackages.join(", ")
+                                  : "none detected"}
+                              </p>
+                            </div>
+                          ))
+                        )}
+                      </div>
                     </div>
                   </div>
-                  <div>
-                    <h4 className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
-                      {entry.language === "R" ? "R Output" : "Python Output"}
-                    </h4>
-                    <div className="mt-2">
-                      <CodeBlock
-                        code={entry.pythonCode}
-                        language={entry.language === "R" ? "r" : "python"}
-                        maxHeight={256}
-                      />
-                    </div>
-                  </div>
-                </div>
-              ) : null}
+                ) : null}
             </article>
           ))
         )}

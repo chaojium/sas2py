@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSession } from "next-auth/react";
+import Image from "next/image";
 import AuthButton from "@/components/AuthButton";
 import CodeBlock from "@/components/CodeBlock";
 
@@ -17,6 +18,19 @@ type Review = {
   };
 };
 
+type Run = {
+  id: string;
+  language: "PYTHON" | "R";
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  timedOut: boolean;
+  durationMs: number;
+  detectedPackages: string[];
+  policyMode: "off" | "blocklist" | "allowlist" | string;
+  createdAt: string;
+};
+
 type Entry = {
   id: string;
   name: string;
@@ -25,12 +39,22 @@ type Entry = {
   pythonCode: string;
   createdAt: string;
   reviews: Review[];
+  runs: Run[];
 };
 
 type Draft = {
   summary: string;
   comments: string;
   rating: string;
+};
+
+type ExecutionResult = {
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  timedOut: boolean;
+  durationMs: number;
+  images?: string[];
 };
 
 export default function Converter() {
@@ -48,6 +72,14 @@ export default function Converter() {
   const [reviewDrafts, setReviewDrafts] = useState<Record<string, Draft>>({});
   const [enhancePrompt, setEnhancePrompt] = useState("");
   const [fullScreen, setFullScreen] = useState(false);
+  const [executeLoading, setExecuteLoading] = useState(false);
+  const [executeError, setExecuteError] = useState<string | null>(null);
+  const [executeResult, setExecuteResult] = useState<ExecutionResult | null>(
+    null,
+  );
+  const [uploadedSasFileName, setUploadedSasFileName] = useState<string | null>(
+    null,
+  );
 
   useEffect(() => {
     if (fullScreen) {
@@ -62,17 +94,17 @@ export default function Converter() {
 
   const canConvert = isAuthed && sasCode.trim().length > 0 && !loading;
 
-  const fetchEntries = async () => {
+  const fetchEntries = useCallback(async () => {
     if (!isAuthed) return;
     const response = await fetch("/api/conversions");
     if (!response.ok) return;
     const data = await response.json();
     setEntries(data.entries || []);
-  };
+  }, [isAuthed]);
 
   useEffect(() => {
-    fetchEntries();
-  }, [isAuthed]);
+    void fetchEntries();
+  }, [fetchEntries]);
 
   const handleConvert = async () => {
     if (!name.trim()) {
@@ -81,6 +113,8 @@ export default function Converter() {
     }
     setLoading(true);
     setError(null);
+    setExecuteError(null);
+    setExecuteResult(null);
     setPythonCode("");
     setCurrentEntryId(null);
     try {
@@ -94,6 +128,8 @@ export default function Converter() {
         throw new Error(data?.error || "Conversion failed.");
       }
       setPythonCode(data.entry.pythonCode);
+      setExecuteResult(null);
+      setExecuteError(null);
       setCurrentEntryId(data.entry.id);
       setLanguage(data.entry.language || "PYTHON");
       setName("");
@@ -184,6 +220,89 @@ export default function Converter() {
     }
   };
 
+  const handleSasFileUpload = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const isSasFile =
+      file.name.toLowerCase().endsWith(".sas") ||
+      file.type === "text/plain" ||
+      file.type === "application/octet-stream";
+    if (!isSasFile) {
+      setError("Please upload a .sas file.");
+      event.target.value = "";
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      setSasCode(text);
+      setUploadedSasFileName(file.name);
+      setError(null);
+      if (!name.trim()) {
+        const baseName = file.name.replace(/\.sas$/i, "");
+        setName(baseName);
+      }
+    } catch {
+      setError("Failed to read the SAS file.");
+    } finally {
+      event.target.value = "";
+    }
+  };
+
+  const handleDownloadConvertedFile = () => {
+    if (!pythonCode.trim()) return;
+    const extension = language === "R" ? "R" : "py";
+    const rawName =
+      currentEntry?.name?.trim() ||
+      name.trim() ||
+      uploadedSasFileName?.replace(/\.sas$/i, "").trim() ||
+      "converted_code";
+    const safeName = rawName.replace(/[^\w.-]+/g, "_");
+    const blob = new Blob([pythonCode], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${safeName}.${extension}`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleExecute = async () => {
+    if (!pythonCode.trim()) {
+      setExecuteError("No generated code to run.");
+      return;
+    }
+    setExecuteLoading(true);
+    setExecuteError(null);
+    setExecuteResult(null);
+    try {
+      const response = await fetch("/api/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code: pythonCode,
+          language,
+          codeEntryId: currentEntryId,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.error || "Execution failed.");
+      }
+      setExecuteResult(data.result || null);
+      await fetchEntries();
+    } catch (err) {
+      setExecuteError(err instanceof Error ? err.message : "Execution failed.");
+    } finally {
+      setExecuteLoading(false);
+    }
+  };
+
   const currentEntry = useMemo(
     () => entries.find((entry) => entry.id === currentEntryId) || null,
     [entries, currentEntryId],
@@ -270,6 +389,22 @@ export default function Converter() {
               onChange={(event) => setSasCode(event.target.value)}
             />
             <div className="flex flex-wrap items-center gap-3">
+              <label className="cursor-pointer rounded-full border border-[var(--border)] px-4 py-2 text-sm text-[var(--muted)] transition hover:bg-white/70">
+                Upload .sas file
+                <input
+                  type="file"
+                  accept=".sas,text/plain"
+                  className="hidden"
+                  onChange={handleSasFileUpload}
+                />
+              </label>
+              {uploadedSasFileName ? (
+                <span className="text-xs text-[var(--muted)]">
+                  Loaded: {uploadedSasFileName}
+                </span>
+              ) : null}
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
               <button
                 onClick={handleConvert}
                 disabled={!canConvert}
@@ -294,12 +429,20 @@ export default function Converter() {
               {language === "R" ? "R output" : "Python output"}
             </h3>
               {pythonCode ? (
-                <button
-                  onClick={() => navigator.clipboard.writeText(pythonCode)}
-                  className="text-xs uppercase tracking-[0.2em] text-[var(--muted)] hover:text-[var(--foreground)]"
-                >
-                  Copy
-                </button>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={handleDownloadConvertedFile}
+                    className="text-xs uppercase tracking-[0.2em] text-[var(--muted)] hover:text-[var(--foreground)]"
+                  >
+                    Download
+                  </button>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(pythonCode)}
+                    className="text-xs uppercase tracking-[0.2em] text-[var(--muted)] hover:text-[var(--foreground)]"
+                  >
+                    Copy
+                  </button>
+                </div>
               ) : null}
             </div>
             <div className="mt-3">
@@ -312,6 +455,106 @@ export default function Converter() {
               maxHeight={320}
             />
             </div>
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              <button
+                onClick={handleExecute}
+                disabled={!pythonCode || executeLoading}
+                className="rounded-full bg-[var(--secondary)] px-5 py-2 text-sm font-semibold text-white transition hover:translate-y-[-1px] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {executeLoading
+                  ? `Running ${language === "R" ? "R" : "Python"}...`
+                  : `Run ${language === "R" ? "R" : "Python"} code`}
+              </button>
+              {executeError ? (
+                <span className="text-sm text-red-600">{executeError}</span>
+              ) : null}
+            </div>
+            {executeResult ? (
+              <div className="mt-4 rounded-2xl border border-[var(--border)] bg-white/70 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h4 className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
+                    Execution output
+                  </h4>
+                  <p className="text-xs text-[var(--muted)]">
+                    Exit code {executeResult.exitCode ?? "unknown"} in{" "}
+                    {executeResult.durationMs}ms
+                    {executeResult.timedOut ? " (timed out)" : ""}
+                  </p>
+                </div>
+                <div className="mt-3 space-y-3">
+                  <div>
+                    <p className="mb-1 text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
+                      Stdout
+                    </p>
+                    <CodeBlock
+                      code={executeResult.stdout || "(no output)"}
+                      language="text"
+                      maxHeight={160}
+                    />
+                  </div>
+                  <div>
+                    <p className="mb-1 text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
+                      Stderr
+                    </p>
+                    <CodeBlock
+                      code={executeResult.stderr || "(no output)"}
+                      language="text"
+                      maxHeight={160}
+                    />
+                  </div>
+                  {executeResult.images && executeResult.images.length > 0 ? (
+                    <div>
+                      <p className="mb-1 text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
+                        Plots
+                      </p>
+                      <div className="grid gap-3 md:grid-cols-2">
+                        {executeResult.images.map((image, index) => (
+                          <Image
+                            key={`${index}-${image.length}`}
+                            src={`data:image/png;base64,${image}`}
+                            alt={`Execution plot ${index + 1}`}
+                            width={1200}
+                            height={800}
+                            unoptimized
+                            className="h-auto w-full rounded-xl border border-[var(--border)] bg-white p-2"
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+            {currentEntry?.runs?.length ? (
+              <div className="mt-4 rounded-2xl border border-[var(--border)] bg-white/70 p-4">
+                <h4 className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
+                  Recent executions
+                </h4>
+                <div className="mt-3 space-y-3">
+                  {currentEntry.runs.slice(0, 3).map((run) => (
+                    <div
+                      key={run.id}
+                      className="rounded-xl border border-[var(--border)] bg-white/80 p-3 text-sm"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--muted)]">
+                        <span>
+                          {new Date(run.createdAt).toLocaleString()} | exit{" "}
+                          {run.exitCode ?? "unknown"} | {run.durationMs}ms
+                          {run.timedOut ? " | timed out" : ""}
+                        </span>
+                        <span>policy: {run.policyMode}</span>
+                      </div>
+                      <p className="mt-2 text-xs text-[var(--muted)]">
+                        packages:{" "}
+                        {run.detectedPackages.length > 0
+                          ? run.detectedPackages.join(", ")
+                          : "none detected"}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
             {currentEntryId && pythonCode ? (
               <div className="mt-4 rounded-2xl border border-[var(--border)] bg-white/70 p-4">
                 <h4 className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
@@ -446,6 +689,8 @@ export default function Converter() {
                     className="rounded-full border border-[var(--border)] px-3 py-1 text-xs uppercase tracking-[0.2em] text-[var(--muted)]"
                     onClick={() => {
                       setPythonCode(entry.pythonCode);
+                      setExecuteResult(null);
+                      setExecuteError(null);
                       setCurrentEntryId(entry.id);
                       setLanguage(entry.language);
                     }}
