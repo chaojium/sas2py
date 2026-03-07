@@ -13,6 +13,10 @@ if (!host || !path || !token) {
   );
 }
 
+const databricksHost = host;
+const databricksPath = path;
+const databricksToken = token;
+
 const client = new DBSQLClient();
 
 let connectionPromise: ReturnType<typeof client.connect> | null = null;
@@ -20,9 +24,9 @@ let connectionPromise: ReturnType<typeof client.connect> | null = null;
 async function getConnection() {
   if (!connectionPromise) {
     connectionPromise = client.connect({
-      host,
-      path,
-      token,
+      host: databricksHost,
+      path: databricksPath,
+      token: databricksToken,
     });
   }
   return connectionPromise;
