@@ -2,7 +2,7 @@ import "server-only";
 import { readFileSync } from "node:fs";
 import { request as httpsRequest } from "node:https";
 import OpenAI from "openai";
-import type { RequestInfo, RequestInit } from "openai/internal/builtin-types";
+import type { ClientOptions } from "openai";
 
 const DEFAULT_TIMEOUT_MS = 90_000;
 const DEFAULT_OPENAI_MODEL = "gpt-5.2";
@@ -26,8 +26,10 @@ export type SasAnalysis = {
   validationChecks: string[];
 };
 
-function createCustomOpenAIFetch(ca: string) {
-  return async (input: RequestInfo, init?: RequestInit) => {
+function createCustomOpenAIFetch(
+  ca: string,
+): NonNullable<ClientOptions["fetch"]> {
+  return async (input, init) => {
     const request = input instanceof Request ? input : new Request(input, init);
     const url = new URL(request.url);
     const bodyBuffer = Buffer.from(await request.arrayBuffer());

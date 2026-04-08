@@ -2,6 +2,7 @@ import "server-only";
 import {
   BlobSASPermissions,
   BlobServiceClient,
+  SASProtocol,
   StorageSharedKeyCredential,
   generateBlobSASQueryParameters,
 } from "@azure/storage-blob";
@@ -96,7 +97,7 @@ export async function uploadExecutionInputsToAzure(
           permissions: BlobSASPermissions.parse("r"),
           startsOn: new Date(Date.now() - 5 * 60 * 1000),
           expiresOn: new Date(Date.now() + expiresInMinutes * 60 * 1000),
-          protocol: "https",
+          protocol: SASProtocol.Https,
         },
         new StorageSharedKeyCredential(account.accountName, account.accountKey),
       ).toString();
