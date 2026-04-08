@@ -1,13 +1,14 @@
 "use client";
 
-import { signIn, signOut, useSession } from "next-auth/react";
+import Link from "next/link";
+import { useAuth } from "@/components/AuthProvider";
 
 type AuthButtonProps = {
   variant?: "primary" | "ghost";
 };
 
 export default function AuthButton({ variant = "ghost" }: AuthButtonProps) {
-  const { data: session, status } = useSession();
+  const { status, signOutUser } = useAuth();
   const isAuthed = status === "authenticated";
 
   const base =
@@ -29,17 +30,14 @@ export default function AuthButton({ variant = "ghost" }: AuthButtonProps) {
 
   return isAuthed ? (
     <button
-      onClick={() => signOut({ callbackUrl: "/" })}
+      onClick={() => void signOutUser()}
       className={`${base} ${variants[variant]}`}
     >
       Sign out
     </button>
   ) : (
-    <button
-      onClick={() => signIn("github", { callbackUrl: "/" })}
-      className={`${base} ${variants[variant]}`}
-    >
+    <Link href="/signin" className={`${base} ${variants[variant]}`}>
       Sign in
-    </button>
+    </Link>
   );
 }

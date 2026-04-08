@@ -1,14 +1,13 @@
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
 import { execute, table } from "@/lib/databricks";
+import { getAuthUser } from "@/lib/firebase/server";
 import { randomUUID } from "node:crypto";
 
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
-  const session = await getServerSession(authOptions);
-  if (!session?.user?.id) {
+  const user = await getAuthUser(request);
+  if (!user?.appUserId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -37,7 +36,7 @@ export async function POST(request: Request) {
 
   const entryRows = await execute<Record<string, unknown>>(
     `SELECT id FROM ${table("code_entries")} WHERE id = ? AND user_id = ? LIMIT 1`,
-    [codeEntryId, session.user.id],
+    [codeEntryId, user.appUserId],
   );
   const entry = entryRows[0];
 
@@ -54,14 +53,14 @@ export async function POST(request: Request) {
       "code_reviews",
     )} (id, code_entry_id, reviewer_id, rating, summary, comments, created_at)
      VALUES (?, ?, ?, ?, ?, ?, current_timestamp())`,
-    [id, codeEntryId, session.user.id, rating, summary || null, comments],
+    [id, codeEntryId, user.appUserId, rating, summary || null, comments],
   );
 
   return NextResponse.json({
     review: {
       id,
       codeEntryId,
-      reviewerId: session.user.id,
+      reviewerId: user.appUserId,
       rating,
       summary: summary || null,
       comments,

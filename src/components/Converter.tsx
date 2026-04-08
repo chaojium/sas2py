@@ -1,10 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useSession } from "next-auth/react";
 import Image from "next/image";
 import AuthButton from "@/components/AuthButton";
+import { useAuth } from "@/components/AuthProvider";
 import CodeBlock from "@/components/CodeBlock";
+import { authFetch } from "@/lib/firebase/auth-fetch";
 
 type Review = {
   id: string;
@@ -31,6 +32,12 @@ type Run = {
   createdAt: string;
 };
 
+type SasAnalysis = {
+  interpretation: string;
+  expectedOutput: string;
+  validationChecks: string[];
+};
+
 type Entry = {
   id: string;
   name: string;
@@ -55,28 +62,41 @@ type ExecutionResult = {
   timedOut: boolean;
   durationMs: number;
   images?: string[];
+  backend?: "databricks" | "docker";
 };
 
 export default function Converter() {
-  const { status } = useSession();
+  const { status } = useAuth();
   const isAuthed = status === "authenticated";
   const [sasCode, setSasCode] = useState("");
   const [name, setName] = useState("");
   const [language, setLanguage] = useState<"PYTHON" | "R">("PYTHON");
   const [pythonCode, setPythonCode] = useState("");
+  const [savedPythonCode, setSavedPythonCode] = useState("");
   const [currentEntryId, setCurrentEntryId] = useState<string | null>(null);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(false);
+  const [saveCodeLoading, setSaveCodeLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reviewDrafts, setReviewDrafts] = useState<Record<string, Draft>>({});
   const [enhancePrompt, setEnhancePrompt] = useState("");
   const [fullScreen, setFullScreen] = useState(false);
+  const [isEditingCode, setIsEditingCode] = useState(false);
   const [executeLoading, setExecuteLoading] = useState(false);
   const [executeError, setExecuteError] = useState<string | null>(null);
   const [executeResult, setExecuteResult] = useState<ExecutionResult | null>(
     null,
   );
+  const [executionInputFiles, setExecutionInputFiles] = useState<File[]>([]);
+  const [sasAnalysisByEntry, setSasAnalysisByEntry] = useState<
+    Record<string, SasAnalysis>
+  >({});
+  const [draftSasAnalysis, setDraftSasAnalysis] = useState<SasAnalysis | null>(
+    null,
+  );
+  const [sasAnalysisLoading, setSasAnalysisLoading] = useState(false);
+  const [sasAnalysisError, setSasAnalysisError] = useState<string | null>(null);
   const [uploadedSasFileName, setUploadedSasFileName] = useState<string | null>(
     null,
   );
@@ -96,7 +116,7 @@ export default function Converter() {
 
   const fetchEntries = useCallback(async () => {
     if (!isAuthed) return;
-    const response = await fetch("/api/conversions");
+    const response = await authFetch("/api/conversions");
     if (!response.ok) return;
     const data = await response.json();
     setEntries(data.entries || []);
@@ -116,11 +136,13 @@ export default function Converter() {
     setExecuteError(null);
     setExecuteResult(null);
     setPythonCode("");
+    setSavedPythonCode("");
     setCurrentEntryId(null);
+    setIsEditingCode(false);
+    setDraftSasAnalysis(null);
     try {
-      const response = await fetch("/api/conversions", {
+      const response = await authFetch("/api/conversions", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sasCode, name, language }),
       });
       const data = await response.json();
@@ -128,11 +150,20 @@ export default function Converter() {
         throw new Error(data?.error || "Conversion failed.");
       }
       setPythonCode(data.entry.pythonCode);
+      setSavedPythonCode(data.entry.pythonCode);
       setExecuteResult(null);
       setExecuteError(null);
       setCurrentEntryId(data.entry.id);
+      if (data.entry.sasAnalysis) {
+        setSasAnalysisByEntry((prev) => ({
+          ...prev,
+          [data.entry.id]: data.entry.sasAnalysis,
+        }));
+        setDraftSasAnalysis(data.entry.sasAnalysis);
+        setSasAnalysisError(null);
+      }
       setLanguage(data.entry.language || "PYTHON");
-      setName("");
+      setName(data.entry.name || name);
       setEnhancePrompt("");
       await fetchEntries();
     } catch (err) {
@@ -167,9 +198,8 @@ export default function Converter() {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch("/api/reviews", {
+      const response = await authFetch("/api/reviews", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           codeEntryId: entryId,
           summary: draft.summary,
@@ -198,9 +228,8 @@ export default function Converter() {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch("/api/conversions", {
+      const response = await authFetch("/api/conversions", {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           entryId: currentEntryId,
           instruction: enhancePrompt,
@@ -211,7 +240,9 @@ export default function Converter() {
         throw new Error(data?.error || "Enhancement failed.");
       }
       setPythonCode(data.entry.pythonCode);
+      setSavedPythonCode(data.entry.pythonCode);
       setEnhancePrompt("");
+      setIsEditingCode(false);
       await fetchEntries();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Enhancement failed.");
@@ -239,6 +270,7 @@ export default function Converter() {
     try {
       const text = await file.text();
       setSasCode(text);
+      setDraftSasAnalysis(null);
       setUploadedSasFileName(file.name);
       setError(null);
       if (!name.trim()) {
@@ -249,6 +281,39 @@ export default function Converter() {
       setError("Failed to read the SAS file.");
     } finally {
       event.target.value = "";
+    }
+  };
+
+  const handleSaveEditedCode = async () => {
+    if (!currentEntryId || !pythonCode.trim()) {
+      setError("No edited code to save.");
+      return;
+    }
+
+    setSaveCodeLoading(true);
+    setError(null);
+    try {
+      const response = await authFetch("/api/conversions", {
+        method: "PATCH",
+        body: JSON.stringify({
+          entryId: currentEntryId,
+          pythonCode,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.error || "Saving edited code failed.");
+      }
+      setPythonCode(data.entry.pythonCode);
+      setSavedPythonCode(data.entry.pythonCode);
+      setIsEditingCode(false);
+      await fetchEntries();
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Saving edited code failed.",
+      );
+    } finally {
+      setSaveCodeLoading(false);
     }
   };
 
@@ -281,15 +346,30 @@ export default function Converter() {
     setExecuteError(null);
     setExecuteResult(null);
     try {
-      const response = await fetch("/api/execute", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          code: pythonCode,
-          language,
-          codeEntryId: currentEntryId,
-        }),
-      });
+      const response = executionInputFiles.length > 0
+        ? await (() => {
+            const formData = new FormData();
+            formData.set("code", pythonCode);
+            formData.set("language", language);
+            if (currentEntryId) {
+              formData.set("codeEntryId", currentEntryId);
+            }
+            for (const file of executionInputFiles) {
+              formData.append("inputFiles", file);
+            }
+            return authFetch("/api/execute", {
+              method: "POST",
+              body: formData,
+            });
+          })()
+        : await authFetch("/api/execute", {
+            method: "POST",
+            body: JSON.stringify({
+              code: pythonCode,
+              language,
+              codeEntryId: currentEntryId,
+            }),
+          });
       const data = await response.json();
       if (!response.ok) {
         throw new Error(data?.error || "Execution failed.");
@@ -303,17 +383,81 @@ export default function Converter() {
     }
   };
 
+  const fetchSasAnalysis = async (
+    sourceSasCode: string,
+    entryId?: string | null,
+  ) => {
+    const response = await authFetch("/api/sas-analysis", {
+      method: "POST",
+      body: JSON.stringify({
+        entryId: entryId || undefined,
+        sasCode: sourceSasCode,
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data?.error || "SAS analysis failed.");
+    }
+    return data.analysis as SasAnalysis;
+  };
+
+  const handleExecutionFileUpload = (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const files = Array.from(event.target.files || []).filter(
+      (file) => file.size > 0,
+    );
+    if (files.length === 0) {
+      event.target.value = "";
+      return;
+    }
+    setExecutionInputFiles((prev) => [...prev, ...files]);
+    setExecuteError(null);
+    event.target.value = "";
+  };
+
+  const handleGenerateSasAnalysis = async () => {
+    const sourceSasCode = currentEntry?.sasCode || sasCode;
+    if (!sourceSasCode.trim()) {
+      setSasAnalysisError("No SAS code available to analyze.");
+      return;
+    }
+
+    setSasAnalysisLoading(true);
+    setSasAnalysisError(null);
+    try {
+      const analysis = await fetchSasAnalysis(sourceSasCode, currentEntryId);
+      if (currentEntryId) {
+        setSasAnalysisByEntry((prev) => ({
+          ...prev,
+          [currentEntryId]: analysis,
+        }));
+      } else {
+        setDraftSasAnalysis(analysis);
+      }
+    } catch (err) {
+      setSasAnalysisError(
+        err instanceof Error ? err.message : "SAS analysis failed.",
+      );
+    } finally {
+      setSasAnalysisLoading(false);
+    }
+  };
+
   const currentEntry = useMemo(
     () => entries.find((entry) => entry.id === currentEntryId) || null,
     [entries, currentEntryId],
   );
+  const currentSasAnalysis = currentEntryId
+    ? sasAnalysisByEntry[currentEntryId] || null
+    : draftSasAnalysis;
 
   if (!isAuthed) {
     return (
       <section className="glass-card fade-up rounded-3xl p-8 md:p-12">
         <div className="flex flex-col gap-6">
           <h2 className="text-2xl font-semibold">
-            Sign in to start converting SAS to Python.
+            Sign in to start converting SAS to Python or R.
           </h2>
           {/* <p className="text-[var(--muted)]">
             Authentication keeps your code history and review notes private to
@@ -345,8 +489,8 @@ export default function Converter() {
             </button>
           </div>
           <p className="mt-3 text-sm text-[var(--muted)]">
-            Paste SAS code, run the conversion, then annotate the Python output
-            with review notes.
+            Paste SAS code, run the conversion, then annotate the output with
+            review notes.
           </p>
           <div className="mt-6 space-y-4">
             <input
@@ -386,7 +530,12 @@ export default function Converter() {
               className="min-h-[220px] w-full rounded-2xl border border-[var(--border)] bg-white/80 p-4 font-mono text-sm shadow-inner focus:outline-none focus:ring-2 focus:ring-[var(--secondary)]"
               placeholder="Paste SAS code here..."
               value={sasCode}
-              onChange={(event) => setSasCode(event.target.value)}
+              onChange={(event) => {
+                setSasCode(event.target.value);
+                if (!currentEntryId) {
+                  setDraftSasAnalysis(null);
+                }
+              }}
             />
             <div className="flex flex-wrap items-center gap-3">
               <label className="cursor-pointer rounded-full border border-[var(--border)] px-4 py-2 text-sm text-[var(--muted)] transition hover:bg-white/70">
@@ -404,6 +553,60 @@ export default function Converter() {
                 </span>
               ) : null}
             </div>
+            {(currentEntry || sasCode.trim()) && (
+              <div className="rounded-2xl border border-[var(--border)] bg-white/70 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <h4 className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
+                    SAS interpretation
+                  </h4>
+                  <button
+                    onClick={handleGenerateSasAnalysis}
+                    disabled={sasAnalysisLoading}
+                    className="rounded-full border border-[var(--border)] px-4 py-2 text-xs uppercase tracking-[0.2em] text-[var(--muted)] transition hover:bg-white/70 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {sasAnalysisLoading ? "Analyzing..." : "Analyze SAS"}
+                  </button>
+                </div>
+                {sasAnalysisError ? (
+                  <p className="mt-3 text-sm text-red-600">{sasAnalysisError}</p>
+                ) : null}
+                {currentSasAnalysis ? (
+                  <div className="mt-3 space-y-4">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
+                        Interpretation
+                      </p>
+                      <p className="mt-2 text-sm leading-6">
+                        {currentSasAnalysis.interpretation}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
+                        Expected output
+                      </p>
+                      <p className="mt-2 text-sm leading-6">
+                        {currentSasAnalysis.expectedOutput}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
+                        Validation checks
+                      </p>
+                      <ul className="mt-2 space-y-2 text-sm leading-6 text-[var(--foreground)]">
+                        {currentSasAnalysis.validationChecks.map((check, index) => (
+                          <li key={`${index}-${check}`}>- {check}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="mt-3 text-sm text-[var(--muted)]">
+                    Generate a plain-language interpretation of the SAS logic and
+                    a summary of the expected output for validation.
+                  </p>
+                )}
+              </div>
+            )}
             <div className="flex flex-wrap items-center gap-3">
               <button
                 onClick={handleConvert}
@@ -413,7 +616,10 @@ export default function Converter() {
               {loading ? "Running GPT-5.2..." : "Convert"}
             </button>
               <button
-                onClick={() => setSasCode("")}
+                onClick={() => {
+                  setSasCode("");
+                  setDraftSasAnalysis(null);
+                }}
                 className="rounded-full border border-[var(--border)] px-4 py-2 text-sm text-[var(--muted)] transition hover:bg-white/70"
               >
                 Clear
@@ -425,11 +631,37 @@ export default function Converter() {
           </div>
           <div className="mt-8">
             <div className="flex items-center justify-between">
-            <h3 className="text-lg font-semibold">
-              {language === "R" ? "R output" : "Python output"}
-            </h3>
+              <h3 className="text-lg font-semibold">
+                {language === "R" ? "R output" : "Python output"}
+              </h3>
               {pythonCode ? (
                 <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => {
+                      if (isEditingCode) {
+                        setPythonCode(savedPythonCode);
+                        setIsEditingCode(false);
+                        return;
+                      }
+                      setIsEditingCode(true);
+                    }}
+                    className="text-xs uppercase tracking-[0.2em] text-[var(--muted)] hover:text-[var(--foreground)]"
+                  >
+                    {isEditingCode ? "Cancel edit" : "Edit"}
+                  </button>
+                  {currentEntryId ? (
+                    <button
+                      onClick={handleSaveEditedCode}
+                      disabled={
+                        saveCodeLoading ||
+                        !isEditingCode ||
+                        pythonCode === savedPythonCode
+                      }
+                      className="text-xs uppercase tracking-[0.2em] text-[var(--muted)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {saveCodeLoading ? "Saving..." : "Save edits"}
+                    </button>
+                  ) : null}
                   <button
                     onClick={handleDownloadConvertedFile}
                     className="text-xs uppercase tracking-[0.2em] text-[var(--muted)] hover:text-[var(--foreground)]"
@@ -446,16 +678,49 @@ export default function Converter() {
               ) : null}
             </div>
             <div className="mt-3">
-            <CodeBlock
-              code={
-                pythonCode ||
-                `Your converted ${language === "R" ? "R" : "Python"} will appear here once GPT-5.2 finishes the translation.`
-              }
-              language={language === "R" ? "r" : "python"}
-              maxHeight={320}
-            />
+              {isEditingCode ? (
+                <textarea
+                  className="min-h-[320px] w-full rounded-2xl border border-[var(--border)] bg-white/80 p-4 font-mono text-sm shadow-inner focus:outline-none focus:ring-2 focus:ring-[var(--secondary)]"
+                  value={pythonCode}
+                  onChange={(event) => setPythonCode(event.target.value)}
+                  spellCheck={false}
+                />
+              ) : (
+                <CodeBlock
+                  code={
+                    pythonCode ||
+                    `Your converted ${language === "R" ? "R" : "Python"} will appear here once GPT-5.2 finishes the translation.`
+                  }
+                  language={language === "R" ? "r" : "python"}
+                  maxHeight={320}
+                />
+              )}
             </div>
             <div className="mt-4 flex flex-wrap items-center gap-3">
+              <label className="cursor-pointer rounded-full border border-[var(--border)] px-4 py-2 text-sm text-[var(--muted)] transition hover:bg-white/70">
+                Upload input file
+                <input
+                  type="file"
+                  multiple
+                  className="hidden"
+                  onChange={handleExecutionFileUpload}
+                />
+              </label>
+              {executionInputFiles.length > 0 ? (
+                <>
+                  <span className="text-xs text-[var(--muted)]">
+                    {executionInputFiles.length} input file
+                    {executionInputFiles.length === 1 ? "" : "s"} attached
+                    {" "}for execution
+                  </span>
+                  <button
+                    onClick={() => setExecutionInputFiles([])}
+                    className="text-xs uppercase tracking-[0.2em] text-[var(--muted)] hover:text-[var(--foreground)]"
+                  >
+                    Clear files
+                  </button>
+                </>
+              ) : null}
               <button
                 onClick={handleExecute}
                 disabled={!pythonCode || executeLoading}
@@ -469,6 +734,29 @@ export default function Converter() {
                 <span className="text-sm text-red-600">{executeError}</span>
               ) : null}
             </div>
+            {executionInputFiles.length > 0 ? (
+              <div className="mt-3 rounded-2xl border border-[var(--border)] bg-white/70 p-4">
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
+                  Execution input files
+                </p>
+                <p className="mt-2 text-sm text-[var(--muted)]">
+                  Uploaded files are exposed to the execution runtime through
+                  the <code>SAS2PY_INPUT_DIR</code> folder. Docker runs use
+                  <code>/workspace/input</code>. Databricks runs use
+                  <code>/tmp/sas2py-input</code>.
+                </p>
+                <div className="mt-3 space-y-2">
+                  {executionInputFiles.map((file, index) => (
+                    <div
+                      key={`${file.name}-${file.size}-${index}`}
+                      className="rounded-xl border border-[var(--border)] bg-white/80 px-3 py-2 text-sm"
+                    >
+                      {file.name}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
             {executeResult ? (
               <div className="mt-4 rounded-2xl border border-[var(--border)] bg-white/70 p-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -479,6 +767,9 @@ export default function Converter() {
                     Exit code {executeResult.exitCode ?? "unknown"} in{" "}
                     {executeResult.durationMs}ms
                     {executeResult.timedOut ? " (timed out)" : ""}
+                    {executeResult.backend
+                      ? ` | backend: ${executeResult.backend}`
+                      : ""}
                   </p>
                 </div>
                 <div className="mt-3 space-y-3">
@@ -687,12 +978,40 @@ export default function Converter() {
                   </div>
                   <button
                     className="rounded-full border border-[var(--border)] px-3 py-1 text-xs uppercase tracking-[0.2em] text-[var(--muted)]"
-                    onClick={() => {
+                    onClick={async () => {
+                      setSasCode(entry.sasCode);
                       setPythonCode(entry.pythonCode);
+                      setSavedPythonCode(entry.pythonCode);
                       setExecuteResult(null);
                       setExecuteError(null);
+                      setExecutionInputFiles([]);
+                      setUploadedSasFileName(null);
                       setCurrentEntryId(entry.id);
+                      setName(entry.name);
                       setLanguage(entry.language);
+                      setIsEditingCode(false);
+                      setSasAnalysisError(null);
+                      try {
+                        if (!sasAnalysisByEntry[entry.id]) {
+                          setSasAnalysisLoading(true);
+                          const analysis = await fetchSasAnalysis(
+                            entry.sasCode,
+                            entry.id,
+                          );
+                          setSasAnalysisByEntry((prev) => ({
+                            ...prev,
+                            [entry.id]: analysis,
+                          }));
+                        }
+                      } catch (error) {
+                        setSasAnalysisError(
+                          error instanceof Error
+                            ? error.message
+                            : "SAS analysis failed.",
+                        );
+                      } finally {
+                        setSasAnalysisLoading(false);
+                      }
                     }}
                   >
                     View

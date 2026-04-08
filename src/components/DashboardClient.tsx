@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useSession } from "next-auth/react";
 import AuthButton from "@/components/AuthButton";
+import { useAuth } from "@/components/AuthProvider";
+import { authFetch } from "@/lib/firebase/auth-fetch";
 
 type Summary = {
   conversions: number;
@@ -10,13 +11,13 @@ type Summary = {
 };
 
 export default function DashboardClient() {
-  const { status } = useSession();
+  const { status } = useAuth();
   const isAuthed = status === "authenticated";
   const [summary, setSummary] = useState<Summary | null>(null);
 
   useEffect(() => {
     if (!isAuthed) return;
-    fetch("/api/summary")
+    authFetch("/api/summary")
       .then((res) => res.json())
       .then((data) => setSummary(data))
       .catch(() => setSummary(null));
@@ -55,7 +56,7 @@ export default function DashboardClient() {
             {summary ? summary.conversions : "--"}
           </p>
           <p className="mt-2 text-sm text-[var(--muted)]">
-            Total SAS to Python conversions stored.
+            Total SAS to Python or R conversions stored.
           </p>
         </div>
         <div className="rounded-2xl border border-[var(--border)] bg-white/80 p-6">

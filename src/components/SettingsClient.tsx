@@ -1,10 +1,10 @@
 "use client";
 
-import { useSession } from "next-auth/react";
 import AuthButton from "@/components/AuthButton";
+import { useAuth } from "@/components/AuthProvider";
 
 export default function SettingsClient() {
-  const { data: session, status } = useSession();
+  const { user, status } = useAuth();
   const isAuthed = status === "authenticated";
 
   if (!isAuthed) {
@@ -38,7 +38,7 @@ export default function SettingsClient() {
             Name
           </p>
           <p className="mt-3 text-lg font-semibold">
-            {session?.user?.name || "Unnamed"}
+            {user?.displayName || "Unnamed"}
           </p>
         </div>
         <div className="rounded-2xl border border-[var(--border)] bg-white/80 p-6">
@@ -46,7 +46,7 @@ export default function SettingsClient() {
             Email
           </p>
           <p className="mt-3 text-lg font-semibold">
-            {session?.user?.email || "No email"}
+            {user?.email || "No email"}
           </p>
         </div>
       </div>

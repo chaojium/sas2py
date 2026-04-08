@@ -1,39 +1,42 @@
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
 import { execute, table } from "@/lib/databricks";
 import {
+  analyzeSasCode,
   convertSasToPython,
   convertSasToR,
   refineConversion,
 } from "@/lib/codex";
+import { getAuthUser } from "@/lib/firebase/server";
 import { randomUUID } from "node:crypto";
 
 export const runtime = "nodejs";
 
 export async function GET(request: Request) {
-  const session = await getServerSession(authOptions);
-  if (!session?.user?.id) {
+  const user = await getAuthUser(request);
+  if (!user?.appUserId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   const { searchParams } = new URL(request.url);
   const query = searchParams.get("search")?.trim();
-  const filters: string[] = [`user_id = ?`];
-  const params: unknown[] = [session.user.id];
+  const filters: string[] = [`e.user_id = ?`];
+  const params: unknown[] = [user.appUserId];
   if (query) {
     filters.push(
-      `(lower(name) LIKE ? OR lower(sas_code) LIKE ? OR lower(python_code) LIKE ?)`,
+      `(lower(e.name) LIKE ? OR lower(e.sas_code) LIKE ? OR lower(e.python_code) LIKE ?)`,
     );
     const like = `%${query.toLowerCase()}%`;
     params.push(like, like, like);
   }
 
   const entries = await execute<Record<string, unknown>>(
-    `SELECT id, user_id, name, language, sas_code, python_code, created_at
+    `SELECT e.id, e.user_id, e.project_id, e.name, e.language, e.sas_code, e.python_code, e.created_at,
+            p.name AS project_name
      FROM ${table("code_entries")}
+     e
+     LEFT JOIN ${table("projects")} p ON p.id = e.project_id AND p.user_id = e.user_id
      WHERE ${filters.join(" AND ")}
-     ORDER BY created_at DESC`,
+     ORDER BY e.created_at DESC`,
     params,
   );
 
@@ -87,6 +90,8 @@ export async function GET(request: Request) {
   const formattedEntries = entries.map((entry) => ({
     id: entry.id,
     userId: entry.user_id,
+    projectId: entry.project_id,
+    projectName: entry.project_name,
     name: entry.name,
     language: entry.language,
     sasCode: entry.sas_code,
@@ -124,8 +129,8 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const session = await getServerSession(authOptions);
-  if (!session?.user?.id) {
+  const user = await getAuthUser(request);
+  if (!user?.appUserId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -146,27 +151,28 @@ export async function POST(request: Request) {
   }
 
   try {
-    const pythonCode =
-      language === "R"
-        ? await convertSasToR(sasCode)
-        : await convertSasToPython(sasCode);
+    const [pythonCode, sasAnalysis] = await Promise.all([
+      language === "R" ? convertSasToR(sasCode) : convertSasToPython(sasCode),
+      analyzeSasCode(sasCode),
+    ]);
     const id = randomUUID();
     await execute(
       `INSERT INTO ${table(
         "code_entries",
       )} (id, user_id, name, language, sas_code, python_code, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, current_timestamp(), current_timestamp())`,
-      [id, session.user.id, name, language, sasCode, pythonCode],
+      [id, user.appUserId, name, language, sasCode, pythonCode],
     );
 
     return NextResponse.json({
       entry: {
         id,
-        userId: session.user.id,
+        userId: user.appUserId,
         name,
         language,
         sasCode,
         pythonCode,
+        sasAnalysis,
         createdAt: new Date().toISOString(),
         reviews: [],
       },
@@ -190,29 +196,40 @@ export async function POST(request: Request) {
 }
 
 export async function PATCH(request: Request) {
-  const session = await getServerSession(authOptions);
-  if (!session?.user?.id) {
+  const user = await getAuthUser(request);
+  if (!user?.appUserId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   const body = await request.json();
   const entryId = typeof body?.entryId === "string" ? body.entryId : "";
+  const projectId =
+    body?.projectId === null
+      ? null
+      : typeof body?.projectId === "string"
+        ? body.projectId.trim()
+        : undefined;
+  const editedPythonCode =
+    typeof body?.pythonCode === "string" ? body.pythonCode : "";
   const instruction =
     typeof body?.instruction === "string" ? body.instruction.trim() : "";
 
-  if (!entryId || !instruction) {
+  if (
+    !entryId ||
+    (!instruction && !editedPythonCode.trim() && projectId === undefined)
+  ) {
     return NextResponse.json(
-      { error: "Entry and instruction are required." },
+      { error: "Entry and either instruction or code are required." },
       { status: 400 },
     );
   }
 
   const entryRows = await execute<Record<string, unknown>>(
-    `SELECT id, user_id, name, language, sas_code, python_code
+    `SELECT id, user_id, project_id, name, language, sas_code, python_code
      FROM ${table("code_entries")}
      WHERE id = ? AND user_id = ?
      LIMIT 1`,
-    [entryId, session.user.id],
+    [entryId, user.appUserId],
   );
   const entry = entryRows[0];
 
@@ -224,6 +241,62 @@ export async function PATCH(request: Request) {
   }
 
   try {
+    if (projectId !== undefined) {
+      if (projectId) {
+        const projectRows = await execute<Record<string, unknown>>(
+          `SELECT id, name FROM ${table("projects")} WHERE id = ? AND user_id = ? LIMIT 1`,
+          [projectId, user.appUserId],
+        );
+        if (!projectRows[0]) {
+          return NextResponse.json(
+            { error: "Project not found." },
+            { status: 404 },
+          );
+        }
+      }
+
+      await execute(
+        `UPDATE ${table(
+          "code_entries",
+        )} SET project_id = ?, updated_at = current_timestamp()
+         WHERE id = ? AND user_id = ?`,
+        [projectId, entry.id, user.appUserId],
+      );
+
+      return NextResponse.json({
+        entry: {
+          id: entry.id,
+          userId: entry.user_id,
+          projectId,
+          name: entry.name,
+          language: entry.language,
+          sasCode: entry.sas_code,
+          pythonCode: entry.python_code,
+        },
+      });
+    }
+
+    if (editedPythonCode.trim()) {
+      await execute(
+        `UPDATE ${table(
+          "code_entries",
+        )} SET python_code = ?, updated_at = current_timestamp()
+         WHERE id = ? AND user_id = ?`,
+        [editedPythonCode, entry.id, user.appUserId],
+      );
+
+      return NextResponse.json({
+        entry: {
+          id: entry.id,
+          userId: entry.user_id,
+          name: entry.name,
+          language: entry.language,
+          sasCode: entry.sas_code,
+          pythonCode: editedPythonCode,
+        },
+      });
+    }
+
     const pythonCode = await refineConversion(
       entry.sas_code as string,
       entry.python_code as string,
@@ -235,7 +308,7 @@ export async function PATCH(request: Request) {
         "code_entries",
       )} SET python_code = ?, updated_at = current_timestamp()
        WHERE id = ? AND user_id = ?`,
-      [pythonCode, entry.id, session.user.id],
+      [pythonCode, entry.id, user.appUserId],
     );
 
     return NextResponse.json({
@@ -264,4 +337,80 @@ export async function PATCH(request: Request) {
       { status: 500 },
     );
   }
+}
+
+export async function DELETE(request: Request) {
+  const user = await getAuthUser(request);
+  if (!user?.appUserId) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { searchParams } = new URL(request.url);
+  let entryId = searchParams.get("entryId")?.trim() || "";
+
+  if (!entryId) {
+    try {
+      const body = await request.json();
+      entryId = typeof body?.entryId === "string" ? body.entryId.trim() : "";
+    } catch {
+      // ignore body parse failure for empty-body deletes
+    }
+  }
+
+  if (!entryId) {
+    return NextResponse.json({ error: "entryId is required." }, { status: 400 });
+  }
+
+  let entryRows = await execute<Record<string, unknown>>(
+    `SELECT id, user_id FROM ${table("code_entries")} WHERE id = ? AND user_id = ? LIMIT 1`,
+    [entryId, user.appUserId],
+  );
+
+  if (!entryRows[0]) {
+    entryRows = await execute<Record<string, unknown>>(
+      `SELECT id, user_id FROM ${table("code_entries")} WHERE id = ? LIMIT 1`,
+      [entryId],
+    );
+  }
+
+  if (!entryRows[0]) {
+    return NextResponse.json({ error: "Code entry not found." }, { status: 404 });
+  }
+
+  const entry = entryRows[0];
+  const owner = String(entry.user_id || "").toLowerCase();
+  if (owner && owner !== user.appUserId.toLowerCase()) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  try {
+    await execute(
+      `DELETE FROM ${table("code_runs")} WHERE code_entry_id = ? AND user_id = ?`,
+      [entryId, user.appUserId],
+    );
+  } catch (error) {
+    console.warn("Skipping code run delete:", error);
+  }
+
+  await execute(
+    `DELETE FROM ${table("code_reviews")} WHERE code_entry_id = ?`,
+    [entryId],
+  );
+  await execute(
+    `DELETE FROM ${table("code_entries")} WHERE id = ?`,
+    [entryId],
+  );
+
+  const remainingRows = await execute<Record<string, unknown>>(
+    `SELECT id FROM ${table("code_entries")} WHERE id = ? LIMIT 1`,
+    [entryId],
+  );
+  if (remainingRows[0]) {
+    return NextResponse.json(
+      { error: "Deletion did not complete." },
+      { status: 500 },
+    );
+  }
+
+  return NextResponse.json({ success: true });
 }

@@ -1,10 +1,10 @@
 "use client";
 
-import { useSession } from "next-auth/react";
 import AuthButton from "@/components/AuthButton";
+import { useAuth } from "@/components/AuthProvider";
 
 export default function Hero() {
-  const { status } = useSession();
+  const { status } = useAuth();
   if (status === "authenticated") {
     return null;
   }
@@ -20,7 +20,8 @@ export default function Hero() {
       </div>
       <div className="max-w-3xl space-y-4">
         <h1 className="text-4xl font-semibold leading-tight md:text-6xl">
-          Transform SAS logic into clean Python, then review with context.
+          Transform SAS logic into clean Python or R, then review and refine
+          with context.
         </h1>
         {/* <p className="text-lg text-[var(--muted)]">
           GPT-5.2 handles the translation. You control the output, capture
