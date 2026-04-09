@@ -15,6 +15,32 @@ export type ExecutionInputFile = {
   name: string;
   content: Buffer;
 };
+export type DatabricksExecutionHandle = {
+  runId: number;
+  language: ExecutionLanguage;
+  detectedPackages: string[];
+  policyMode: PackagePolicyMode;
+  startedAt: number;
+  backend: "databricks";
+};
+export type DatabricksExecutionStatus =
+  | {
+      completed: false;
+      runId: number;
+      language: ExecutionLanguage;
+      statusMessage: string;
+      lifeCycleState: string;
+      resultState: string;
+      durationMs: number;
+      backend: "databricks";
+    }
+  | {
+      completed: true;
+      runId: number;
+      language: ExecutionLanguage;
+      result: RawExecutionResult;
+      backend: "databricks";
+    };
 
 type RunState = {
   life_cycle_state?: string;
@@ -781,18 +807,15 @@ async function cancelRun(baseUrl: string, token: string, runId: number) {
   }
 }
 
-async function runCodeInDatabricks(
+async function buildDatabricksPayloadCode(
   code: string,
   language: ExecutionLanguage,
-  timeoutMs: number,
-  pollIntervalMs: number,
   inputFiles: ExecutionInputFile[] = [],
 ) {
   const basePayloadCode =
     language === "PYTHON"
       ? buildPythonExecutionEnvelope(code)
       : buildRExecutionEnvelope(code);
-  let payloadCode = basePayloadCode;
   if (inputFiles.length > 0 && isAzureBlobUploadConfigured()) {
     const uploadedFiles = await uploadExecutionInputsToAzure(
       inputFiles.map((file) => ({
@@ -800,12 +823,9 @@ async function runCodeInDatabricks(
         content: file.content,
       })),
     );
-    payloadCode = applyDatabricksBlobSetup(
-      basePayloadCode,
-      language,
-      uploadedFiles,
-    );
-  } else if (inputFiles.length > 0) {
+    return applyDatabricksBlobSetup(basePayloadCode, language, uploadedFiles);
+  }
+  if (inputFiles.length > 0) {
     const databricksInputFileMaxBytes = parsePositiveInt(
       process.env.CODE_RUNNER_DATABRICKS_INPUT_FILE_MAX_BYTES,
       DEFAULT_DATABRICKS_INPUT_FILE_MAX_BYTES,
@@ -819,16 +839,17 @@ async function runCodeInDatabricks(
         `Uploaded input files are too large for Databricks notebook parameters (${totalInputBytes} bytes). Limit is ${databricksInputFileMaxBytes} bytes. Configure Azure Blob Storage for Databricks file handoff, or use the docker runner.`,
       );
     }
-    payloadCode = applyDatabricksInputSetup(
-      basePayloadCode,
-      language,
-      inputFiles,
-    );
+    return applyDatabricksInputSetup(basePayloadCode, language, inputFiles);
   }
+  return basePayloadCode;
+}
+
+async function submitDatabricksRun(
+  payloadCode: string,
+  language: ExecutionLanguage,
+) {
   const jobId = getJobId(language);
   const { baseUrl, token } = getDatabricksConfig(language);
-
-  const startedAt = Date.now();
   const submit = await databricksApi<{ run_id: number }>(
     baseUrl,
     token,
@@ -841,51 +862,81 @@ async function runCodeInDatabricks(
       }),
     },
   );
+  return {
+    runId: submit.run_id,
+    baseUrl,
+    token,
+  };
+}
 
-  let runStateMessage = "";
-  let resultState = "";
-  let timedOut = false;
+async function fetchDatabricksRunStatus(
+  runId: number,
+  language: ExecutionLanguage,
+  startedAt: number,
+) {
+  const timeoutMs = parsePositiveInt(
+    process.env.CODE_RUNNER_TIMEOUT_MS,
+    DEFAULT_TIMEOUT_MS,
+  );
+  const { baseUrl, token } = getDatabricksConfig(language);
+  const status = await getRunDetails(baseUrl, token, runId);
+  const lifeCycleState = status.state?.life_cycle_state || "";
+  const resultState = status.state?.result_state || "";
+  const statusMessage = status.state?.state_message || "";
 
-  while (true) {
-    if (Date.now() - startedAt > timeoutMs) {
-      timedOut = true;
-      await cancelRun(baseUrl, token, submit.run_id);
-      break;
-    }
-    const status = await getRunDetails(baseUrl, token, submit.run_id);
-    const lifeCycle = status.state?.life_cycle_state || "";
-    resultState = status.state?.result_state || "";
-    runStateMessage = status.state?.state_message || "";
-    if (
-      lifeCycle === "TERMINATED" ||
-      lifeCycle === "SKIPPED" ||
-      lifeCycle === "INTERNAL_ERROR"
-    ) {
-      break;
-    }
-    await sleep(pollIntervalMs);
+  if (Date.now() - startedAt > timeoutMs) {
+    await cancelRun(baseUrl, token, runId);
+    return {
+      completed: true,
+      runId,
+      language,
+      backend: "databricks" as const,
+      result: {
+        stdout: statusMessage,
+        stderr: "Execution timed out and run was cancelled.",
+        exitCode: 1,
+        timedOut: true,
+        durationMs: Date.now() - startedAt,
+        images: [],
+      },
+    } satisfies DatabricksExecutionStatus;
+  }
+
+  if (
+    lifeCycleState !== "TERMINATED" &&
+    lifeCycleState !== "SKIPPED" &&
+    lifeCycleState !== "INTERNAL_ERROR"
+  ) {
+    return {
+      completed: false,
+      runId,
+      language,
+      statusMessage,
+      lifeCycleState,
+      resultState,
+      durationMs: Date.now() - startedAt,
+      backend: "databricks" as const,
+    } satisfies DatabricksExecutionStatus;
   }
 
   let stdout = "";
   let stderr = "";
   let images: string[] = [];
-  if (!timedOut) {
-    try {
-      const output = await getOutputWithTaskFallback(
-        baseUrl,
-        token,
-        submit.run_id,
-        language,
-      );
-      stdout = output.notebook_output?.result || "";
-      stderr = output.error || "";
-      if (output.notebook_output?.truncated) {
-        stdout = `${stdout}\n\n[output truncated by Databricks]`;
-      }
-    } catch (error) {
-      stderr =
-        error instanceof Error ? error.message : "Failed to fetch Databricks run output.";
+  try {
+    const output = await getOutputWithTaskFallback(
+      baseUrl,
+      token,
+      runId,
+      language,
+    );
+    stdout = output.notebook_output?.result || "";
+    stderr = output.error || "";
+    if (output.notebook_output?.truncated) {
+      stdout = `${stdout}\n\n[output truncated by Databricks]`;
     }
+  } catch (error) {
+    stderr =
+      error instanceof Error ? error.message : "Failed to fetch Databricks run output.";
   }
 
   if (stdout) {
@@ -897,21 +948,109 @@ async function runCodeInDatabricks(
     }
   }
 
-  if (!stdout && runStateMessage) {
-    stdout = runStateMessage;
-  }
-  if (timedOut) {
-    stderr = stderr || "Execution timed out and run was cancelled.";
+  if (!stdout && statusMessage) {
+    stdout = statusMessage;
   }
 
   return {
-    stdout,
-    stderr,
-    exitCode: timedOut || (resultState && resultState !== "SUCCESS") ? 1 : 0,
-    timedOut,
-    durationMs: Date.now() - startedAt,
-    images,
-  } satisfies RawExecutionResult;
+    completed: true,
+    runId,
+    language,
+    backend: "databricks" as const,
+    result: {
+      stdout,
+      stderr,
+      exitCode: resultState && resultState !== "SUCCESS" ? 1 : 0,
+      timedOut: false,
+      durationMs: Date.now() - startedAt,
+      images,
+    },
+  } satisfies DatabricksExecutionStatus;
+}
+
+export async function startDatabricksExecution(
+  code: string,
+  language: ExecutionLanguage,
+  inputFiles: ExecutionInputFile[] = [],
+) {
+  if (!code.trim()) {
+    throw new Error("Code is required.");
+  }
+  const { mode, detectedPackages } = validatePackagePolicy(code, language);
+  const payloadCode = await buildDatabricksPayloadCode(code, language, inputFiles);
+  const submitted = await submitDatabricksRun(payloadCode, language);
+  return {
+    runId: submitted.runId,
+    language,
+    detectedPackages,
+    policyMode: mode,
+    startedAt: Date.now(),
+    backend: "databricks" as const,
+  } satisfies DatabricksExecutionHandle;
+}
+
+export async function getDatabricksExecutionStatus(
+  handle: DatabricksExecutionHandle,
+) {
+  const maxOutputChars = parsePositiveInt(
+    process.env.CODE_RUNNER_MAX_OUTPUT_CHARS,
+    DEFAULT_MAX_OUTPUT_CHARS,
+  );
+  const status = await fetchDatabricksRunStatus(
+    handle.runId,
+    handle.language,
+    handle.startedAt,
+  );
+  if (!status.completed) {
+    return status;
+  }
+  return {
+    ...status,
+    result: {
+      stdout: truncateOutput(status.result.stdout, maxOutputChars),
+      stderr: truncateOutput(status.result.stderr, maxOutputChars),
+      exitCode: status.result.exitCode,
+      timedOut: status.result.timedOut,
+      durationMs: status.result.durationMs,
+      images: status.result.images,
+      detectedPackages: handle.detectedPackages,
+      policyMode: handle.policyMode,
+      backend: "databricks" as const,
+    },
+  };
+}
+
+async function runCodeInDatabricks(
+  code: string,
+  language: ExecutionLanguage,
+  timeoutMs: number,
+  pollIntervalMs: number,
+  inputFiles: ExecutionInputFile[] = [],
+) {
+  const handle = await startDatabricksExecution(code, language, inputFiles);
+  const startedAt = handle.startedAt;
+
+  while (true) {
+    const status = await fetchDatabricksRunStatus(
+      handle.runId,
+      language,
+      startedAt,
+    );
+    if (status.completed) {
+      return status.result satisfies RawExecutionResult;
+    }
+    if (Date.now() - startedAt > timeoutMs) {
+      return {
+        stdout: status.statusMessage,
+        stderr: "Execution timed out and run was cancelled.",
+        exitCode: 1,
+        timedOut: true,
+        durationMs: Date.now() - startedAt,
+        images: [],
+      } satisfies RawExecutionResult;
+    }
+    await sleep(pollIntervalMs);
+  }
 }
 
 function getDockerConfig(language: ExecutionLanguage) {

@@ -65,6 +65,14 @@ type ExecutionResult = {
   backend?: "databricks" | "docker";
 };
 
+type ExecuteApiResponse = {
+  pending?: boolean;
+  token?: string;
+  result?: ExecutionResult;
+  error?: string;
+  statusMessage?: string;
+};
+
 async function parseApiResponse<T>(
   response: Response,
 ): Promise<{ data: T | null; text: string }> {
@@ -78,6 +86,10 @@ async function parseApiResponse<T>(
   } catch {
     return { data: null, text };
   }
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export default function Converter() {
@@ -385,7 +397,7 @@ export default function Converter() {
               codeEntryId: currentEntryId,
             }),
           });
-      const { data, text } = await parseApiResponse<{ result?: ExecutionResult; error?: string }>(
+      const { data, text } = await parseApiResponse<ExecuteApiResponse>(
         response,
       );
       if (!response.ok) {
@@ -398,7 +410,36 @@ export default function Converter() {
       if (!data) {
         throw new Error("Execution returned an invalid response.");
       }
-      setExecuteResult(data.result || null);
+      if (data.pending && data.token) {
+        let pollResult: ExecutionResult | null = null;
+        for (let attempt = 0; attempt < 180; attempt += 1) {
+          await sleep(2000);
+          const pollResponse = await authFetch(
+            `/api/execute?token=${encodeURIComponent(data.token)}`,
+          );
+          const poll = await parseApiResponse<ExecuteApiResponse>(pollResponse);
+          if (!pollResponse.ok) {
+            throw new Error(
+              poll.data?.error ||
+                poll.text ||
+                "Execution polling failed.",
+            );
+          }
+          if (!poll.data) {
+            throw new Error("Execution polling returned an invalid response.");
+          }
+          if (!poll.data.pending) {
+            pollResult = poll.data.result || null;
+            break;
+          }
+        }
+        if (!pollResult) {
+          throw new Error("Execution is still running. Please try again shortly.");
+        }
+        setExecuteResult(pollResult);
+      } else {
+        setExecuteResult(data.result || null);
+      }
       await fetchEntries();
     } catch (err) {
       setExecuteError(err instanceof Error ? err.message : "Execution failed.");
