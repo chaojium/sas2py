@@ -21,6 +21,35 @@ const client = new DBSQLClient();
 
 let connectionPromise: ReturnType<typeof client.connect> | null = null;
 
+function getHttpStatusCode(error: unknown) {
+  if (
+    error &&
+    typeof error === "object" &&
+    "statusCode" in error &&
+    typeof error.statusCode === "number"
+  ) {
+    return error.statusCode;
+  }
+  return undefined;
+}
+
+function normalizeDatabricksError(error: unknown, context: string) {
+  const statusCode = getHttpStatusCode(error);
+
+  if (statusCode === 403) {
+    return new Error(
+      `${context}: Databricks rejected the request with 403 Forbidden. Check DATABRICKS_ACCESS_TOKEN, DATABRICKS_HTTP_PATH, warehouse permissions, and that the same environment variables are configured in Vercel.`,
+      { cause: error },
+    );
+  }
+
+  if (error instanceof Error) {
+    return new Error(`${context}: ${error.message}`, { cause: error });
+  }
+
+  return new Error(context, { cause: error });
+}
+
 async function getConnection() {
   if (!connectionPromise) {
     connectionPromise = client.connect({
@@ -40,19 +69,28 @@ export async function execute<T = Record<string, unknown>>(
   statement: string,
   params?: unknown[],
 ) {
-  const connection = await getConnection();
-  const session = await connection.openSession();
+  let session: Awaited<ReturnType<Awaited<ReturnType<typeof getConnection>>["openSession"]>> | null =
+    null;
   try {
+    const connection = await getConnection();
+    session = await connection.openSession();
     const options = params?.length
       ? {
           ordinalParameters: params.map((value) => new DBSQLParameter({ value })),
         }
       : undefined;
     const operation = await session.executeStatement(statement, options);
-    const rows = (await operation.fetchAll()) as T[];
-    await operation.close();
-    return rows;
+    try {
+      const rows = (await operation.fetchAll()) as T[];
+      return rows;
+    } finally {
+      await operation.close();
+    }
+  } catch (error) {
+    throw normalizeDatabricksError(error, "Databricks query failed");
   } finally {
-    await session.close();
+    if (session) {
+      await session.close();
+    }
   }
 }

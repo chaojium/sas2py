@@ -178,13 +178,13 @@ export async function POST(request: Request) {
       },
     });
   } catch (error) {
-    console.error("OpenAI conversion failed:", error);
+    console.error("Conversion request failed:", error);
     return NextResponse.json(
       {
         error:
           error instanceof Error
             ? error.message
-            : "OpenAI conversion failed.",
+            : "Conversion request failed.",
         details:
           process.env.NODE_ENV === "development" && error instanceof Error
             ? error.stack
@@ -322,13 +322,13 @@ export async function PATCH(request: Request) {
       },
     });
   } catch (error) {
-    console.error("OpenAI refinement failed:", error);
+    console.error("Refinement request failed:", error);
     return NextResponse.json(
       {
         error:
           error instanceof Error
             ? error.message
-            : "OpenAI refinement failed.",
+            : "Refinement request failed.",
         details:
           process.env.NODE_ENV === "development" && error instanceof Error
             ? error.stack
