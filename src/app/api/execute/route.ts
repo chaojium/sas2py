@@ -9,6 +9,7 @@ import { getAuthUser } from "@/lib/firebase/server";
 import { randomUUID } from "node:crypto";
 
 export const runtime = "nodejs";
+export const maxDuration = 300;
 
 export async function POST(request: Request) {
   const user = await getAuthUser(request);

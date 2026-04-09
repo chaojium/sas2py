@@ -65,6 +65,21 @@ type ExecutionResult = {
   backend?: "databricks" | "docker";
 };
 
+async function parseApiResponse<T>(
+  response: Response,
+): Promise<{ data: T | null; text: string }> {
+  const text = await response.text();
+  if (!text) {
+    return { data: null, text: "" };
+  }
+
+  try {
+    return { data: JSON.parse(text) as T, text };
+  } catch {
+    return { data: null, text };
+  }
+}
+
 export default function Converter() {
   const { status } = useAuth();
   const isAuthed = status === "authenticated";
@@ -370,9 +385,18 @@ export default function Converter() {
               codeEntryId: currentEntryId,
             }),
           });
-      const data = await response.json();
+      const { data, text } = await parseApiResponse<{ result?: ExecutionResult; error?: string }>(
+        response,
+      );
       if (!response.ok) {
-        throw new Error(data?.error || "Execution failed.");
+        throw new Error(
+          data?.error ||
+            text ||
+            "Execution failed.",
+        );
+      }
+      if (!data) {
+        throw new Error("Execution returned an invalid response.");
       }
       setExecuteResult(data.result || null);
       await fetchEntries();
