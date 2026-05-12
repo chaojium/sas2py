@@ -8,6 +8,11 @@
   --card: #fffaf4;
   --border: #e2d7c6;
   --muted: #6b6257;
+  --font-display:
+    "Aptos", "Segoe UI", "Trebuchet MS", "Helvetica Neue", Arial, sans-serif;
+  --font-mono:
+    "Cascadia Code", "Consolas", "SFMono-Regular", "Liberation Mono",
+    "Courier New", monospace;
 }
 
 @theme inline {
