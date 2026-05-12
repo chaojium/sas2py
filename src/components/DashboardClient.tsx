@@ -11,8 +11,9 @@ type Summary = {
 };
 
 export default function DashboardClient() {
-  const { status } = useAuth();
+  const { status, user } = useAuth();
   const isAuthed = status === "authenticated";
+  const displayName = user?.displayName?.trim();
   const [summary, setSummary] = useState<Summary | null>(null);
 
   useEffect(() => {
@@ -44,7 +45,9 @@ export default function DashboardClient() {
           <p className="text-xs uppercase tracking-[0.3em] text-[var(--muted)]">
             Dashboard
           </p>
-          <h1 className="text-3xl font-semibold">Overview</h1>
+          <h1 className="text-3xl font-semibold">
+            {displayName ? `Welcome, ${displayName}` : "Welcome"}
+          </h1>
         </div>
       </div>
       <div className="mt-8 grid gap-6 md:grid-cols-2">

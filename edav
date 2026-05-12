@@ -1,0 +1,7 @@
+1. Azure web app -- for web hosting
+2. Azure databricks datawarehouse -- for database
+3. Azure databricks compute cluster -- need enable python and R execution
+4. Maas -- for AI model support; or please provide API key for openai models
+5. Azure Machine Learning -- for submit machine learning jobs
+6. Azure blob storage -- for store user artifacts
+7. SAS Viya -- for executing user SAS code (validation purpose)

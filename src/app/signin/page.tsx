@@ -3,6 +3,7 @@
 import Link from "next/link";
 import {
   createUserWithEmailAndPassword,
+  sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signInWithPopup,
 } from "firebase/auth";
@@ -18,6 +19,7 @@ export default function SignInPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -30,6 +32,7 @@ export default function SignInPage() {
     event.preventDefault();
     setLoading(true);
     setError(null);
+    setMessage(null);
 
     try {
       if (mode === "signup") {
@@ -50,6 +53,7 @@ export default function SignInPage() {
   async function handleGoogleSignIn() {
     setLoading(true);
     setError(null);
+    setMessage(null);
 
     try {
       googleProvider.setCustomParameters({ prompt: "select_account" });
@@ -62,6 +66,25 @@ export default function SignInPage() {
       ) {
         setError(authError.message);
       }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handlePasswordReset() {
+    setLoading(true);
+    setError(null);
+    setMessage(null);
+
+    try {
+      await sendPasswordResetEmail(firebaseAuth, email);
+      setMessage("Password reset email sent. Check your inbox for the next step.");
+    } catch (authError) {
+      setError(
+        authError instanceof Error
+          ? authError.message
+          : "Unable to send password reset email.",
+      );
     } finally {
       setLoading(false);
     }
@@ -138,6 +161,16 @@ export default function SignInPage() {
                   required
                   className="rounded-2xl border border-[var(--border)] bg-white/80 px-4 py-3 text-sm shadow-inner focus:outline-none focus:ring-2 focus:ring-[var(--secondary)]"
                 />
+                {mode === "signin" ? (
+                  <button
+                    type="button"
+                    onClick={() => void handlePasswordReset()}
+                    disabled={loading || !email}
+                    className="self-start text-sm font-medium text-[var(--foreground)] underline underline-offset-4 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Forgot password?
+                  </button>
+                ) : null}
                 <button
                   type="submit"
                   disabled={loading}
@@ -158,6 +191,9 @@ export default function SignInPage() {
               >
                 Continue with Google
               </button>
+              {message ? (
+                <p className="text-sm text-emerald-700">{message}</p>
+              ) : null}
               {error ? <p className="text-sm text-red-600">{error}</p> : null}
             </div>
           </div>

@@ -1,11 +1,13 @@
 import "server-only";
 import { readFileSync } from "node:fs";
 import { request as httpsRequest } from "node:https";
-import OpenAI from "openai";
+import { ClientSecretCredential, getBearerTokenProvider } from "@azure/identity";
+import { AzureOpenAI } from "openai";
 import type { ClientOptions } from "openai";
 
 const DEFAULT_TIMEOUT_MS = 90_000;
-const DEFAULT_OPENAI_MODEL = "gpt-5.2";
+const DEFAULT_OPENAI_MODEL = "gpt5.1-dgw-default";
+const DEFAULT_AZURE_OPENAI_API_VERSION = "2025-03-01-preview";
 
 type OpenAIResponse = {
   output_text?: string;
@@ -84,15 +86,52 @@ function createCustomOpenAIFetch(
 }
 
 function getApiConfig() {
-  const apiKey = process.env.OPENAI_API_KEY?.trim();
-  if (!apiKey) {
-    throw new Error("Missing OPENAI_API_KEY.");
-  }
-  const model = process.env.OPENAI_MODEL?.trim() || DEFAULT_OPENAI_MODEL;
+  const tenantId = process.env.AZURE_TENANT_ID?.trim();
+  const clientId = process.env.AZURE_CLIENT_ID?.trim();
+  const clientSecret = process.env.AZURE_CLIENT_SECRET?.trim();
+  const endpoint = process.env.AZURE_OPENAI_ENDPOINT?.trim().replace(/\/+$/, "");
+  const scope = process.env.AZURE_OPENAI_SCOPE?.trim();
+  const subscriptionKey = process.env.APIM_SUBSCRIPTION_KEY?.trim();
+  const model = process.env.AZURE_OPENAI_MODEL?.trim() || DEFAULT_OPENAI_MODEL;
+  const apiVersion =
+    process.env.AZURE_OPENAI_API_VERSION?.trim() ||
+    DEFAULT_AZURE_OPENAI_API_VERSION;
   const timeoutMs = Number(process.env.OPENAI_TIMEOUT_MS || DEFAULT_TIMEOUT_MS);
   const caCertPath = process.env.OPENAI_CA_CERT_PATH?.trim();
   const caCert = caCertPath ? readFileSync(caCertPath, "utf8") : null;
-  return { apiKey, model, timeoutMs, caCert, caCertPath };
+
+  if (!tenantId) {
+    throw new Error("Missing AZURE_TENANT_ID.");
+  }
+  if (!clientId) {
+    throw new Error("Missing AZURE_CLIENT_ID.");
+  }
+  if (!clientSecret) {
+    throw new Error("Missing AZURE_CLIENT_SECRET.");
+  }
+  if (!endpoint) {
+    throw new Error("Missing AZURE_OPENAI_ENDPOINT.");
+  }
+  if (!scope) {
+    throw new Error("Missing AZURE_OPENAI_SCOPE.");
+  }
+  if (!subscriptionKey) {
+    throw new Error("Missing APIM_SUBSCRIPTION_KEY.");
+  }
+
+  return {
+    tenantId,
+    clientId,
+    clientSecret,
+    endpoint,
+    scope,
+    subscriptionKey,
+    model,
+    apiVersion,
+    timeoutMs,
+    caCert,
+    caCertPath,
+  };
 }
 
 function extractOutputText(payload: OpenAIResponse) {
@@ -126,10 +165,32 @@ function extractJsonObject(text: string) {
 }
 
 async function generateWithOpenAI(prompt: string) {
-  const { apiKey, model, timeoutMs, caCert, caCertPath } = getApiConfig();
-  const client = new OpenAI({
-    apiKey,
+  const {
+    tenantId,
+    clientId,
+    clientSecret,
+    endpoint,
+    scope,
+    subscriptionKey,
+    model,
+    apiVersion,
+    timeoutMs,
+    caCert,
+    caCertPath,
+  } = getApiConfig();
+  const credential = new ClientSecretCredential(
+    tenantId,
+    clientId,
+    clientSecret,
+  );
+  const azureADTokenProvider = getBearerTokenProvider(credential, scope);
+  const client = new AzureOpenAI({
+    endpoint,
+    apiVersion,
+    deployment: model,
+    azureADTokenProvider,
     timeout: timeoutMs,
+    defaultHeaders: { "Ocp-Apim-Subscription-Key": subscriptionKey },
     ...(caCert ? { fetch: createCustomOpenAIFetch(caCert) } : {}),
   });
 
@@ -171,7 +232,7 @@ async function generateWithOpenAI(prompt: string) {
       throw new Error(
         caCertPath
           ? `OpenAI TLS validation failed even with OPENAI_CA_CERT_PATH=${caCertPath}. Confirm that the file contains the correct corporate root/intermediate CA.`
-          : "OpenAI TLS validation failed because a self-signed certificate was presented in the network chain. Set OPENAI_CA_CERT_PATH to your corporate CA PEM file, or configure NODE_EXTRA_CA_CERTS for the Node process.",
+          : "Azure OpenAI TLS validation failed because a self-signed certificate was presented in the network chain. Set OPENAI_CA_CERT_PATH to your corporate CA PEM file, or configure NODE_EXTRA_CA_CERTS for the Node process.",
       );
     }
 
@@ -183,6 +244,8 @@ export async function convertSasToPython(sasCode: string) {
   const prompt = [
     "Convert the following SAS code to idiomatic, production-ready Python.",
     "Use pandas where needed and preserve logic and comments.",
+    "Preserve SAS documentation headers and block comments, including banner-style comment sections such as /* ***** ... */.",
+    "Rewrite every SAS comment as an equivalent Python comment instead of dropping or summarizing it.",
     "Return only Python code, no markdown or commentary.",
     "",
     sasCode,
@@ -194,6 +257,8 @@ export async function convertSasToR(sasCode: string) {
   const prompt = [
     "Convert the following SAS code to idiomatic, production-ready R.",
     "Use tidyverse or data.table where appropriate and preserve logic and comments.",
+    "Preserve SAS documentation headers and block comments, including banner-style comment sections such as /* ***** ... */.",
+    "Rewrite every SAS comment as an equivalent R comment instead of dropping or summarizing it.",
     "Return only R code, no markdown or commentary.",
     "",
     sasCode,
@@ -211,6 +276,7 @@ export async function refineConversion(
   const prompt = [
     `You are improving an existing SAS to ${target} conversion.`,
     "Apply the user's instruction while preserving the SAS logic.",
+    "Preserve all SAS documentation comments and banner/header comment blocks in the updated code.",
     `Return only the updated ${target} code, no markdown or commentary.`,
     "",
     "User instruction:",

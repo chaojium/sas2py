@@ -1,10 +1,10 @@
 # SAS2Py Studio
 
-Convert SAS scripts to Python or R with OpenAI GPT-5.2, then keep a review trail in Databricks SQL behind NextAuth.
+Convert SAS scripts to Python or R with Azure OpenAI, then keep a review trail in Databricks SQL behind NextAuth.
 
 ## Features
 
-- GPT-5.2 conversion
+- Azure OpenAI conversion
 - NextAuth-secured workspace
 - Databricks SQL storage for SAS and converted code
 - Review notes and ratings per conversion
@@ -83,12 +83,18 @@ CREATE TABLE IF NOT EXISTS sas2py.prod.code_runs (
 );
 ```
 
-## OpenAI API
+## Azure OpenAI
 
 Set these in `.env`:
 
-- `OPENAI_API_KEY`
-- `OPENAI_MODEL` (default: `gpt-5.2`)
+- `AZURE_TENANT_ID`
+- `AZURE_CLIENT_ID`
+- `AZURE_CLIENT_SECRET`
+- `APIM_SUBSCRIPTION_KEY`
+- `AZURE_OPENAI_SCOPE`
+- `AZURE_OPENAI_ENDPOINT`
+- `AZURE_OPENAI_MODEL` (default: `gpt5.1-dgw-default`)
+- `AZURE_OPENAI_API_VERSION` (default: `2025-03-01-preview`)
 - `OPENAI_TIMEOUT_MS` (default: `90000`)
 - `OPENAI_CA_CERT_PATH` (optional PEM file for corporate TLS interception)
 
@@ -118,9 +124,9 @@ For local development behind a corporate TLS proxy, you can temporarily set
 signature verification. This should only be used in local development, never in
 production.
 
-If OpenAI requests fail with `self-signed certificate in certificate chain`,
+If Azure OpenAI requests fail with `self-signed certificate in certificate chain`,
 configure Node to trust your corporate CA. You can either set
-`OPENAI_CA_CERT_PATH` to a PEM file for this app's OpenAI requests, or set
+`OPENAI_CA_CERT_PATH` to a PEM file for this app's Azure OpenAI requests, or set
 `NODE_EXTRA_CA_CERTS` for the whole Node process.
 
 ## Docker
@@ -140,7 +146,7 @@ docker run --rm -p 3000:3000 --env-file .env sas2py:latest
 Notes:
 
 - The app reads runtime configuration from `.env`.
-- Conversion endpoints call OpenAI Responses API from the backend process.
+- Conversion endpoints call Azure OpenAI Responses API from the backend process.
 - Code execution endpoints call Databricks Jobs from the backend process.
 
 ## Code Runner

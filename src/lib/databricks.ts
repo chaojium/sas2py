@@ -7,15 +7,18 @@ const token = process.env.DATABRICKS_ACCESS_TOKEN?.trim();
 const catalog = process.env.DATABRICKS_CATALOG || "sas2py";
 const schema = process.env.DATABRICKS_SCHEMA || "prod";
 
-if (!host || !path || !token) {
-  throw new Error(
-    "Databricks connection is missing. Set DATABRICKS_SERVER_HOSTNAME, DATABRICKS_HTTP_PATH, and DATABRICKS_ACCESS_TOKEN.",
-  );
+function getDatabricksConfig() {
+  if (!host || !path || !token) {
+    throw new Error(
+      "Databricks connection is missing. Set DATABRICKS_SERVER_HOSTNAME, DATABRICKS_HTTP_PATH, and DATABRICKS_ACCESS_TOKEN.",
+    );
+  }
+  return {
+    host,
+    path,
+    token,
+  };
 }
-
-const databricksHost = host;
-const databricksPath = path;
-const databricksToken = token;
 
 const client = new DBSQLClient();
 
@@ -52,10 +55,11 @@ function normalizeDatabricksError(error: unknown, context: string) {
 
 async function getConnection() {
   if (!connectionPromise) {
+    const config = getDatabricksConfig();
     connectionPromise = client.connect({
-      host: databricksHost,
-      path: databricksPath,
-      token: databricksToken,
+      host: config.host,
+      path: config.path,
+      token: config.token,
     });
   }
   return connectionPromise;

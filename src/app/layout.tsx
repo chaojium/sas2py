@@ -32,6 +32,19 @@ export default function RootLayout({
         <Providers>
           <Header />
           {children}
+          <footer className="border-t border-[var(--border)] bg-white/50 px-6 py-5 text-sm text-[var(--muted)] md:px-12">
+            <div className="mx-auto flex w-full max-w-6xl flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <p>Created by Chao Ji, PhD</p>
+              <a
+                href="https://www.linkedin.com/in/chaojoyceji/"
+                target="_blank"
+                rel="noreferrer"
+                className="font-medium text-[var(--foreground)] underline underline-offset-4 transition hover:text-[var(--secondary)]"
+              >
+                LinkedIn
+              </a>
+            </div>
+          </footer>
         </Providers>
       </body>
     </html>
