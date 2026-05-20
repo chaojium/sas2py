@@ -94,6 +94,7 @@ async function persistExecutionResult(params: {
     durationMs: number;
     detectedPackages: string[];
     policyMode: string;
+    artifacts?: unknown[];
   };
 }) {
   const recordId = `databricks-${params.runId}`;
@@ -107,8 +108,8 @@ async function persistExecutionResult(params: {
   await execute(
     `INSERT INTO ${table(
       "code_runs",
-    )} (id, code_entry_id, user_id, language, stdout, stderr, exit_code, timed_out, duration_ms, detected_packages, policy_mode, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp())`,
+    )} (id, code_entry_id, user_id, language, stdout, stderr, exit_code, timed_out, duration_ms, detected_packages, policy_mode, artifacts_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp())`,
     [
       recordId,
       params.codeEntryId || null,
@@ -121,6 +122,7 @@ async function persistExecutionResult(params: {
       params.result.durationMs,
       params.result.detectedPackages.join(","),
       params.result.policyMode,
+      JSON.stringify(params.result.artifacts || []),
     ],
   );
 }
@@ -242,8 +244,8 @@ export async function POST(request: Request) {
     await execute(
       `INSERT INTO ${table(
         "code_runs",
-      )} (id, code_entry_id, user_id, language, stdout, stderr, exit_code, timed_out, duration_ms, detected_packages, policy_mode, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp())`,
+      )} (id, code_entry_id, user_id, language, stdout, stderr, exit_code, timed_out, duration_ms, detected_packages, policy_mode, artifacts_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp())`,
       [
         runId,
         codeEntryId || null,
@@ -256,6 +258,7 @@ export async function POST(request: Request) {
         result.durationMs,
         result.detectedPackages.join(","),
         result.policyMode,
+        JSON.stringify(result.artifacts || []),
       ],
     );
 

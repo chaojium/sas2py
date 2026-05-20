@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
+import { useSearchParams } from "next/navigation";
 import AuthButton from "@/components/AuthButton";
 import { useAuth } from "@/components/AuthProvider";
 import CodeBlock from "@/components/CodeBlock";
@@ -29,6 +30,13 @@ type Run = {
   durationMs: number;
   detectedPackages: string[];
   policyMode: "off" | "blocklist" | "allowlist" | string;
+  artifacts?: {
+    name: string;
+    contentType: string;
+    sizeBytes: number;
+    downloadUrl?: string;
+    contentBase64?: string;
+  }[];
   createdAt: string;
 };
 
@@ -38,15 +46,52 @@ type SasAnalysis = {
   validationChecks: string[];
 };
 
+type ConversationMessage = {
+  id: string;
+  role: "user" | "assistant" | string;
+  content: string;
+  messageType: string | null;
+  createdAt: string;
+};
+
+type ConversationThread = {
+  id: string;
+  codeEntryId: string;
+  title: string | null;
+  createdAt: string;
+  updatedAt: string | null;
+  messages: ConversationMessage[];
+};
+
+type Enhancement = {
+  id: string;
+  language: "PYTHON" | "R" | string;
+  instruction: string;
+  previousCode: string;
+  updatedCode: string;
+  createdAt: string;
+};
+
 type Entry = {
   id: string;
   name: string;
   language: "PYTHON" | "R";
   sasCode: string;
   pythonCode: string;
+  additionalGuidance?: string | null;
+  referenceUrl?: string | null;
   createdAt: string;
+  enhancements: Enhancement[];
   reviews: Review[];
   runs: Run[];
+};
+
+type EntryGroup = {
+  id: string;
+  name: string;
+  sasCode: string;
+  createdAt: string;
+  entries: Entry[];
 };
 
 type Draft = {
@@ -62,6 +107,13 @@ type ExecutionResult = {
   timedOut: boolean;
   durationMs: number;
   images?: string[];
+  artifacts?: {
+    name: string;
+    contentType: string;
+    sizeBytes: number;
+    downloadUrl?: string;
+    contentBase64?: string;
+  }[];
   backend?: "databricks" | "docker";
 };
 
@@ -71,6 +123,15 @@ type ExecuteApiResponse = {
   result?: ExecutionResult;
   error?: string;
   statusMessage?: string;
+};
+
+type ConvertApiResponse = {
+  entry: Entry & {
+    userId?: string;
+    sasAnalysis?: SasAnalysis;
+  };
+  reusedExisting?: boolean;
+  error?: string;
 };
 
 async function parseApiResponse<T>(
@@ -92,12 +153,93 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function buildPreview(text: string, maxLength = 280) {
+  const normalized = text.trim();
+  if (normalized.length <= maxLength) {
+    return { text: normalized, truncated: false };
+  }
+  return {
+    text: `${normalized.slice(0, maxLength).trimEnd()}...`,
+    truncated: true,
+  };
+}
+
+function runToExecutionResult(run: Run): ExecutionResult {
+  return {
+    stdout: run.stdout,
+    stderr: run.stderr,
+    exitCode: run.exitCode,
+    timedOut: run.timedOut,
+    durationMs: run.durationMs,
+    images: [],
+    artifacts: run.artifacts || [],
+  };
+}
+
+function formatArtifactSize(sizeBytes: number) {
+  if (sizeBytes < 1024) return `${sizeBytes} B`;
+  if (sizeBytes < 1024 * 1024) return `${(sizeBytes / 1024).toFixed(1)} KB`;
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function buildEntryGroupKey(entry: Entry) {
+  return `${entry.name.trim().toLowerCase()}::${entry.sasCode.trim()}`;
+}
+
+function getChangedLineNumbers(previousCode: string, nextCode: string) {
+  const previousLines = previousCode.split("\n");
+  const nextLines = nextCode.split("\n");
+  const rows = previousLines.length;
+  const cols = nextLines.length;
+  const lcs = Array.from({ length: rows + 1 }, () =>
+    Array<number>(cols + 1).fill(0),
+  );
+
+  for (let row = rows - 1; row >= 0; row -= 1) {
+    for (let col = cols - 1; col >= 0; col -= 1) {
+      lcs[row][col] =
+        previousLines[row] === nextLines[col]
+          ? lcs[row + 1][col + 1] + 1
+          : Math.max(lcs[row + 1][col], lcs[row][col + 1]);
+    }
+  }
+
+  const changed: number[] = [];
+  let row = 0;
+  let col = 0;
+
+  while (row < rows && col < cols) {
+    if (previousLines[row] === nextLines[col]) {
+      row += 1;
+      col += 1;
+      continue;
+    }
+
+    if (lcs[row + 1][col] >= lcs[row][col + 1]) {
+      row += 1;
+    } else {
+      changed.push(col + 1);
+      col += 1;
+    }
+  }
+
+  while (col < cols) {
+    changed.push(col + 1);
+    col += 1;
+  }
+
+  return changed;
+}
+
 export default function Converter() {
   const { status } = useAuth();
+  const searchParams = useSearchParams();
   const isAuthed = status === "authenticated";
   const [sasCode, setSasCode] = useState("");
   const [name, setName] = useState("");
   const [language, setLanguage] = useState<"PYTHON" | "R">("PYTHON");
+  const [additionalGuidance, setAdditionalGuidance] = useState("");
+  const [referenceUrl, setReferenceUrl] = useState("");
   const [pythonCode, setPythonCode] = useState("");
   const [savedPythonCode, setSavedPythonCode] = useState("");
   const [currentEntryId, setCurrentEntryId] = useState<string | null>(null);
@@ -108,6 +250,7 @@ export default function Converter() {
   const [error, setError] = useState<string | null>(null);
   const [reviewDrafts, setReviewDrafts] = useState<Record<string, Draft>>({});
   const [enhancePrompt, setEnhancePrompt] = useState("");
+  const [enhanceLoading, setEnhanceLoading] = useState(false);
   const [fullScreen, setFullScreen] = useState(false);
   const [isEditingCode, setIsEditingCode] = useState(false);
   const [executeLoading, setExecuteLoading] = useState(false);
@@ -116,6 +259,8 @@ export default function Converter() {
     null,
   );
   const [executionInputFiles, setExecutionInputFiles] = useState<File[]>([]);
+  const [confirmClearExecutionFiles, setConfirmClearExecutionFiles] =
+    useState(false);
   const [sasAnalysisByEntry, setSasAnalysisByEntry] = useState<
     Record<string, SasAnalysis>
   >({});
@@ -127,6 +272,28 @@ export default function Converter() {
   const [uploadedSasFileName, setUploadedSasFileName] = useState<string | null>(
     null,
   );
+  const [conversationThreads, setConversationThreads] = useState<
+    Record<string, ConversationThread[]>
+  >({});
+  const [conversationPrompt, setConversationPrompt] = useState("");
+  const [conversationLoading, setConversationLoading] = useState(false);
+  const [conversationError, setConversationError] = useState<string | null>(null);
+  const [applySuggestionLoadingId, setApplySuggestionLoadingId] = useState<
+    string | null
+  >(null);
+  const [showAllConversationMessages, setShowAllConversationMessages] =
+    useState(false);
+  const [showAllEnhancements, setShowAllEnhancements] = useState(false);
+  const [expandedConversationMessages, setExpandedConversationMessages] =
+    useState<Record<string, boolean>>({});
+  const [expandedEnhancements, setExpandedEnhancements] = useState<
+    Record<string, boolean>
+  >({});
+  const [highlightedCodeLines, setHighlightedCodeLines] = useState<number[]>(
+    [],
+  );
+  const [forceRegenerate, setForceRegenerate] = useState(false);
+  const sasLineNumberRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (fullScreen) {
@@ -153,6 +320,38 @@ export default function Converter() {
     void fetchEntries();
   }, [fetchEntries]);
 
+  const fetchConversationThreads = useCallback(
+    async (entryId: string) => {
+      const response = await authFetch(
+        `/api/conversations?codeEntryId=${encodeURIComponent(entryId)}`,
+      );
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.error || "Conversation history failed to load.");
+      }
+      const conversations = (data.conversations || []) as ConversationThread[];
+      setConversationThreads((prev) => ({
+        ...prev,
+        [entryId]: conversations,
+      }));
+      return conversations;
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!isAuthed || !currentEntryId) {
+      return;
+    }
+    void fetchConversationThreads(currentEntryId).catch((error) => {
+      setConversationError(
+        error instanceof Error
+          ? error.message
+          : "Conversation history failed to load.",
+      );
+    });
+  }, [currentEntryId, fetchConversationThreads, isAuthed]);
+
   const handleConvert = async () => {
     if (!name.trim()) {
       setError("Name is required before converting.");
@@ -170,28 +369,51 @@ export default function Converter() {
     try {
       const response = await authFetch("/api/conversions", {
         method: "POST",
-        body: JSON.stringify({ sasCode, name, language }),
+        body: JSON.stringify({
+          sasCode,
+          name,
+          language,
+          forceRegenerate,
+          additionalGuidance,
+          referenceUrl,
+        }),
       });
-      const data = await response.json();
+      const data = (await response.json()) as ConvertApiResponse;
       if (!response.ok) {
         throw new Error(data?.error || "Conversion failed.");
       }
       setPythonCode(data.entry.pythonCode);
       setSavedPythonCode(data.entry.pythonCode);
+      setHighlightedCodeLines([]);
       setExecuteResult(null);
       setExecuteError(null);
       setCurrentEntryId(data.entry.id);
       if (data.entry.sasAnalysis) {
+        const sasAnalysis = data.entry.sasAnalysis;
         setSasAnalysisByEntry((prev) => ({
           ...prev,
-          [data.entry.id]: data.entry.sasAnalysis,
+          [data.entry.id]: sasAnalysis,
         }));
-        setDraftSasAnalysis(data.entry.sasAnalysis);
+        setDraftSasAnalysis(sasAnalysis);
         setSasAnalysisError(null);
       }
       setLanguage(data.entry.language || "PYTHON");
       setName(data.entry.name || name);
-      setEnhancePrompt("");
+      setAdditionalGuidance(data.entry.additionalGuidance || "");
+      setReferenceUrl(data.entry.referenceUrl || "");
+      setConversationPrompt("");
+      setConversationError(null);
+      setShowAllConversationMessages(false);
+      setShowAllEnhancements(false);
+      setExpandedConversationMessages({});
+      setExpandedEnhancements({});
+      if (data.reusedExisting) {
+        setError(
+          "Reused the latest saved translation for this same SAS code and language instead of generating a new one.",
+        );
+      } else if (forceRegenerate) {
+        setError("Generated a fresh translation by bypassing saved-result reuse.");
+      }
       await fetchEntries();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Conversion failed.");
@@ -252,7 +474,7 @@ export default function Converter() {
       setError("Add a refinement prompt before running enhancement.");
       return;
     }
-    setLoading(true);
+    setEnhanceLoading(true);
     setError(null);
     try {
       const response = await authFetch("/api/conversions", {
@@ -266,15 +488,25 @@ export default function Converter() {
       if (!response.ok) {
         throw new Error(data?.error || "Enhancement failed.");
       }
+      const nextCode = data.entry.pythonCode as string;
+      setHighlightedCodeLines(getChangedLineNumbers(pythonCode, nextCode));
       setPythonCode(data.entry.pythonCode);
       setSavedPythonCode(data.entry.pythonCode);
-      setEnhancePrompt("");
       setIsEditingCode(false);
+      if (data.entry.enhancements) {
+        setEntries((prev) =>
+          prev.map((entry) =>
+            entry.id === currentEntryId
+              ? { ...entry, enhancements: data.entry.enhancements }
+              : entry,
+          ),
+        );
+      }
       await fetchEntries();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Enhancement failed.");
     } finally {
-      setLoading(false);
+      setEnhanceLoading(false);
     }
   };
 
@@ -331,6 +563,8 @@ export default function Converter() {
       if (!response.ok) {
         throw new Error(data?.error || "Saving edited code failed.");
       }
+      const nextCode = data.entry.pythonCode as string;
+      setHighlightedCodeLines(getChangedLineNumbers(savedPythonCode, nextCode));
       setPythonCode(data.entry.pythonCode);
       setSavedPythonCode(data.entry.pythonCode);
       setIsEditingCode(false);
@@ -448,6 +682,33 @@ export default function Converter() {
     }
   };
 
+  const handleDownloadArtifact = (artifact: NonNullable<ExecutionResult["artifacts"]>[number]) => {
+    if (artifact.downloadUrl) {
+      window.open(artifact.downloadUrl, "_blank", "noopener,noreferrer");
+      return;
+    }
+    if (!artifact.contentBase64) {
+      return;
+    }
+
+    const binary = atob(artifact.contentBase64);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    const blob = new Blob([bytes], {
+      type: artifact.contentType || "application/octet-stream",
+    });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = artifact.name.split("/").pop() || artifact.name;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  };
+
   const fetchSasAnalysis = async (
     sourceSasCode: string,
     entryId?: string | null,
@@ -478,7 +739,24 @@ export default function Converter() {
     }
     setExecutionInputFiles((prev) => [...prev, ...files]);
     setExecuteError(null);
+    setConfirmClearExecutionFiles(false);
     event.target.value = "";
+  };
+
+  const handleRemoveExecutionInputFile = (targetIndex: number) => {
+    setExecutionInputFiles((prev) =>
+      prev.filter((_, index) => index !== targetIndex),
+    );
+    setConfirmClearExecutionFiles(false);
+  };
+
+  const handleClearExecutionInputFiles = () => {
+    if (!confirmClearExecutionFiles) {
+      setConfirmClearExecutionFiles(true);
+      return;
+    }
+    setExecutionInputFiles([]);
+    setConfirmClearExecutionFiles(false);
   };
 
   const handleGenerateSasAnalysis = async () => {
@@ -509,13 +787,197 @@ export default function Converter() {
     }
   };
 
+  const handleConversationSend = async () => {
+    if (!currentEntryId || !conversationPrompt.trim()) {
+      setConversationError("Add a question or error message first.");
+      return;
+    }
+
+    setConversationLoading(true);
+    setConversationError(null);
+    try {
+      const latestConversation =
+        conversationThreads[currentEntryId]?.[0] || null;
+      const response = await authFetch("/api/conversations", {
+        method: "POST",
+        body: JSON.stringify({
+          codeEntryId: currentEntryId,
+          conversationId: latestConversation?.id,
+          message: conversationPrompt,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.error || "Conversation request failed.");
+      }
+      const conversation = data.conversation as ConversationThread | undefined;
+      if (conversation) {
+        setConversationThreads((prev) => ({
+          ...prev,
+          [currentEntryId]: [
+            conversation,
+            ...(prev[currentEntryId] || []).filter(
+              (thread) => thread.id !== conversation.id,
+            ),
+          ],
+        }));
+      } else {
+        await fetchConversationThreads(currentEntryId);
+      }
+      setConversationPrompt("");
+      setShowAllConversationMessages(false);
+      setShowAllEnhancements(false);
+      setExpandedConversationMessages({});
+    } catch (err) {
+      setConversationError(
+        err instanceof Error ? err.message : "Conversation request failed.",
+      );
+    } finally {
+      setConversationLoading(false);
+    }
+  };
+
+  const handleApplyAssistantSuggestion = async (message: ConversationMessage) => {
+    if (!currentEntryId || message.role !== "assistant") {
+      return;
+    }
+
+    setApplySuggestionLoadingId(message.id);
+    setError(null);
+    try {
+      const response = await authFetch("/api/conversions", {
+        method: "PATCH",
+        body: JSON.stringify({
+          entryId: currentEntryId,
+          instruction: message.content,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.error || "Applying assistant suggestion failed.");
+      }
+      const nextCode = data.entry.pythonCode as string;
+      setHighlightedCodeLines(getChangedLineNumbers(pythonCode, nextCode));
+      setPythonCode(data.entry.pythonCode);
+      setSavedPythonCode(data.entry.pythonCode);
+      setIsEditingCode(false);
+      if (data.entry.enhancements) {
+        setEntries((prev) =>
+          prev.map((entry) =>
+            entry.id === currentEntryId
+              ? { ...entry, pythonCode: data.entry.pythonCode, enhancements: data.entry.enhancements }
+              : entry,
+          ),
+        );
+      }
+      await fetchEntries();
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Applying assistant suggestion failed.",
+      );
+    } finally {
+      setApplySuggestionLoadingId(null);
+    }
+  };
+
   const currentEntry = useMemo(
     () => entries.find((entry) => entry.id === currentEntryId) || null,
     [entries, currentEntryId],
   );
+  const canApplyEnhancement =
+    Boolean(currentEntryId) && Boolean(enhancePrompt.trim()) && !enhanceLoading;
   const currentSasAnalysis = currentEntryId
     ? sasAnalysisByEntry[currentEntryId] || null
     : draftSasAnalysis;
+  const currentConversation =
+    currentEntryId && conversationThreads[currentEntryId]?.length
+      ? conversationThreads[currentEntryId][0]
+      : null;
+  const groupedEntries = useMemo<EntryGroup[]>(() => {
+    const groups = new Map<string, EntryGroup>();
+
+    for (const entry of entries) {
+      const key = buildEntryGroupKey(entry);
+      const existing = groups.get(key);
+      if (existing) {
+        existing.entries.push(entry);
+        if (
+          new Date(entry.createdAt).getTime() >
+          new Date(existing.createdAt).getTime()
+        ) {
+          existing.createdAt = entry.createdAt;
+        }
+      } else {
+        groups.set(key, {
+          id: key,
+          name: entry.name,
+          sasCode: entry.sasCode,
+          createdAt: entry.createdAt,
+          entries: [entry],
+        });
+      }
+    }
+
+    return Array.from(groups.values())
+      .map((group) => ({
+        ...group,
+        entries: [...group.entries].sort(
+          (a, b) =>
+            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+        ),
+      }))
+      .sort(
+        (a, b) =>
+          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+      );
+  }, [entries]);
+  const visibleConversationMessages = showAllConversationMessages
+    ? currentConversation?.messages || []
+    : (currentConversation?.messages || []).slice(-4);
+  const visibleEnhancements = showAllEnhancements
+    ? currentEntry?.enhancements || []
+    : (currentEntry?.enhancements || []).slice(0, 4);
+  const sasLineNumbers = useMemo(() => {
+    const lineCount = Math.max(1, sasCode.split("\n").length);
+    return Array.from({ length: lineCount }, (_, index) => index + 1);
+  }, [sasCode]);
+
+  const handleViewEntry = useCallback(async (entry: Entry) => {
+    setSasCode(entry.sasCode);
+    setPythonCode(entry.pythonCode);
+    setSavedPythonCode(entry.pythonCode);
+    setExecuteResult(
+      entry.runs.length > 0 ? runToExecutionResult(entry.runs[0]) : null,
+    );
+    setExecuteError(null);
+    setExecutionInputFiles([]);
+    setUploadedSasFileName(null);
+    setCurrentEntryId(entry.id);
+    setConversationPrompt("");
+    setConversationError(null);
+    setShowAllConversationMessages(false);
+    setShowAllEnhancements(false);
+    setExpandedConversationMessages({});
+    setExpandedEnhancements({});
+    setName(entry.name);
+    setLanguage(entry.language);
+    setAdditionalGuidance(entry.additionalGuidance || "");
+    setReferenceUrl(entry.referenceUrl || "");
+    setIsEditingCode(false);
+    setSasAnalysisError(null);
+    setHighlightedCodeLines([]);
+  }, []);
+
+  useEffect(() => {
+    const requestedEntryId = searchParams.get("entryId");
+    if (!requestedEntryId || entries.length === 0) return;
+    if (currentEntryId === requestedEntryId) return;
+    const entry = entries.find((item) => item.id === requestedEntryId);
+    if (!entry) return;
+    void handleViewEntry(entry);
+  }, [currentEntryId, entries, handleViewEntry, searchParams]);
 
   if (!isAuthed) {
     return (
@@ -542,8 +1004,8 @@ export default function Converter() {
           : ""
       }`}
     >
-      <div className="grid gap-8 lg:grid-cols-[1.05fr_0.95fr]">
-        <div className="glass-card rounded-3xl p-6 md:p-10">
+      <div className="grid gap-8 lg:grid-cols-[1.35fr_0.65fr]">
+        <div className="glass-card min-w-0 rounded-3xl p-6 md:p-10">
           <div className="flex items-center justify-between gap-4">
             <h2 className="text-2xl font-semibold">Conversion workspace</h2>
             <button
@@ -592,16 +1054,49 @@ export default function Converter() {
               </button>
             </div>
             <textarea
-              className="min-h-[220px] w-full rounded-2xl border border-[var(--border)] bg-white/80 p-4 font-mono text-sm shadow-inner focus:outline-none focus:ring-2 focus:ring-[var(--secondary)]"
-              placeholder="Paste SAS code here..."
-              value={sasCode}
-              onChange={(event) => {
-                setSasCode(event.target.value);
-                if (!currentEntryId) {
-                  setDraftSasAnalysis(null);
-                }
-              }}
+              className="min-h-[110px] w-full rounded-2xl border border-[var(--border)] bg-white/80 p-4 text-sm shadow-inner focus:outline-none focus:ring-2 focus:ring-[var(--secondary)]"
+              placeholder="Additional guidance for translation, such as method notes, constraints, or expected statistical approach..."
+              value={additionalGuidance}
+              onChange={(event) => setAdditionalGuidance(event.target.value)}
             />
+            <input
+              className="w-full rounded-2xl border border-[var(--border)] bg-white/80 px-4 py-3 text-sm shadow-inner focus:outline-none focus:ring-2 focus:ring-[var(--secondary)]"
+              placeholder="Reference URL (optional), e.g. CDC method page"
+              value={referenceUrl}
+              onChange={(event) => setReferenceUrl(event.target.value)}
+            />
+            <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-white/80 shadow-inner focus-within:ring-2 focus-within:ring-[var(--secondary)]">
+              <div className="flex min-w-0">
+                <div
+                  ref={sasLineNumberRef}
+                  className="max-h-[420px] min-h-[220px] shrink-0 overflow-hidden border-r border-[var(--border)] bg-[color:color-mix(in_oklab,var(--foreground)_4%,white)] px-3 py-4 font-mono text-xs leading-6 text-[var(--muted)]"
+                >
+                  {sasLineNumbers.map((lineNumber) => (
+                    <div key={lineNumber} className="text-right">
+                      {lineNumber}
+                    </div>
+                  ))}
+                </div>
+                <textarea
+                  className="max-h-[420px] min-h-[220px] min-w-0 w-full resize-y border-0 bg-transparent p-4 font-mono text-sm leading-6 focus:outline-none"
+                  placeholder="Paste SAS code here..."
+                  value={sasCode}
+                  onChange={(event) => {
+                    setSasCode(event.target.value);
+                    if (!currentEntryId) {
+                      setDraftSasAnalysis(null);
+                    }
+                  }}
+                  onScroll={(event) => {
+                    if (sasLineNumberRef.current) {
+                      sasLineNumberRef.current.scrollTop =
+                        event.currentTarget.scrollTop;
+                    }
+                  }}
+                  spellCheck={false}
+                />
+              </div>
+            </div>
             <div className="flex flex-wrap items-center gap-3">
               <label className="cursor-pointer rounded-full border border-[var(--border)] px-4 py-2 text-sm text-[var(--muted)] transition hover:bg-white/70">
                 Upload .sas file
@@ -693,8 +1188,17 @@ export default function Converter() {
                 <span className="text-sm text-red-600">{error}</span>
               ) : null}
             </div>
+            <label className="flex items-center gap-2 text-sm text-[var(--muted)]">
+              <input
+                type="checkbox"
+                checked={forceRegenerate}
+                onChange={(event) => setForceRegenerate(event.target.checked)}
+                className="h-4 w-4 rounded border-[var(--border)]"
+              />
+              Force regenerate instead of reusing the latest saved translation
+            </label>
           </div>
-          <div className="mt-8">
+            <div className="mt-8 min-w-0">
             <div className="flex items-center justify-between">
               <h3 className="text-lg font-semibold">
                 {language === "R" ? "R output" : "Python output"}
@@ -758,6 +1262,8 @@ export default function Converter() {
                   }
                   language={language === "R" ? "r" : "python"}
                   maxHeight={320}
+                  showLineNumbers
+                  highlightedLines={highlightedCodeLines}
                 />
               )}
             </div>
@@ -779,10 +1285,10 @@ export default function Converter() {
                     {" "}for execution
                   </span>
                   <button
-                    onClick={() => setExecutionInputFiles([])}
+                    onClick={handleClearExecutionInputFiles}
                     className="text-xs uppercase tracking-[0.2em] text-[var(--muted)] hover:text-[var(--foreground)]"
                   >
-                    Clear files
+                    {confirmClearExecutionFiles ? "Confirm clear" : "Clear files"}
                   </button>
                 </>
               ) : null}
@@ -814,9 +1320,15 @@ export default function Converter() {
                   {executionInputFiles.map((file, index) => (
                     <div
                       key={`${file.name}-${file.size}-${index}`}
-                      className="rounded-xl border border-[var(--border)] bg-white/80 px-3 py-2 text-sm"
+                      className="flex items-center justify-between gap-3 rounded-xl border border-[var(--border)] bg-white/80 px-3 py-2 text-sm"
                     >
-                      {file.name}
+                      <span className="min-w-0 flex-1 truncate">{file.name}</span>
+                      <button
+                        onClick={() => handleRemoveExecutionInputFile(index)}
+                        className="text-xs uppercase tracking-[0.2em] text-[var(--muted)] hover:text-red-600"
+                      >
+                        Remove
+                      </button>
                     </div>
                   ))}
                 </div>
@@ -846,6 +1358,7 @@ export default function Converter() {
                       code={executeResult.stdout || "(no output)"}
                       language="text"
                       maxHeight={160}
+                      wrapLongLines
                     />
                   </div>
                   <div>
@@ -856,8 +1369,37 @@ export default function Converter() {
                       code={executeResult.stderr || "(no output)"}
                       language="text"
                       maxHeight={160}
+                      wrapLongLines
                     />
                   </div>
+                  {executeResult.artifacts && executeResult.artifacts.length > 0 ? (
+                    <div>
+                      <p className="mb-1 text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
+                        Downloadable outputs
+                      </p>
+                      <div className="space-y-2">
+                        {executeResult.artifacts.map((artifact) => (
+                          <div
+                            key={`${artifact.name}-${artifact.sizeBytes}`}
+                            className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--border)] bg-white/80 px-3 py-2 text-sm"
+                          >
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate font-medium">{artifact.name}</p>
+                              <p className="text-xs text-[var(--muted)]">
+                                {formatArtifactSize(artifact.sizeBytes)} | {artifact.contentType}
+                              </p>
+                            </div>
+                            <button
+                              onClick={() => handleDownloadArtifact(artifact)}
+                              className="rounded-full border border-[var(--border)] px-3 py-1 text-xs uppercase tracking-[0.2em] text-[var(--muted)]"
+                            >
+                              Download
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                   {executeResult.images && executeResult.images.length > 0 ? (
                     <div>
                       <p className="mb-1 text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
@@ -926,11 +1468,170 @@ export default function Converter() {
                   <div className="flex flex-wrap items-center gap-3">
                     <button
                       onClick={handleEnhance}
-                      className="rounded-full bg-[var(--foreground)] px-5 py-2 text-sm font-semibold text-[var(--background)] transition hover:translate-y-[-1px]"
+                      disabled={!canApplyEnhancement}
+                      className="rounded-full bg-[var(--foreground)] px-5 py-2 text-sm font-semibold text-[var(--background)] transition hover:translate-y-[-1px] disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      Apply enhancement
+                      {enhanceLoading ? "Applying enhancement..." : "Apply enhancement"}
                     </button>
                   </div>
+                  <p className="text-xs text-[var(--muted)]">
+                    Your instruction stays here after each run, so you can refine it and apply additional enhancements.
+                  </p>
+                </div>
+              </div>
+            ) : null}
+            {currentEntryId ? (
+              <div className="mt-4 rounded-2xl border border-[var(--border)] bg-white/70 p-4">
+                <h4 className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
+                  Ask about this code
+                </h4>
+                <div className="mt-3 space-y-3">
+                  <textarea
+                    className="min-h-[100px] w-full rounded-xl border border-[var(--border)] bg-white/90 px-3 py-2 text-sm"
+                    placeholder="Paste an error message, traceback, or ask what to change..."
+                    value={conversationPrompt}
+                    onChange={(event) => setConversationPrompt(event.target.value)}
+                  />
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      onClick={handleConversationSend}
+                      disabled={!conversationPrompt.trim() || conversationLoading}
+                      className="rounded-full bg-[var(--secondary)] px-5 py-2 text-sm font-semibold text-white transition hover:translate-y-[-1px] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {conversationLoading ? "Thinking..." : "Ask assistant"}
+                    </button>
+                    {conversationError ? (
+                      <span className="text-sm text-red-600">{conversationError}</span>
+                    ) : null}
+                  </div>
+                  <div className="space-y-3">
+                    {currentConversation?.messages?.length ? (
+                      <>
+                        {visibleConversationMessages.map((message) => (
+                          (() => {
+                            const preview = buildPreview(message.content);
+                            const expanded = expandedConversationMessages[message.id];
+                            const displayText =
+                              expanded || !preview.truncated
+                                ? message.content
+                                : preview.text;
+
+                            return (
+                              <div
+                                key={message.id}
+                                className={`rounded-xl border p-3 text-sm ${
+                                  message.role === "assistant"
+                                    ? "border-[var(--border)] bg-white/85"
+                                    : "border-[color:color-mix(in_oklab,var(--secondary)_35%,white)] bg-[color:color-mix(in_oklab,var(--secondary)_10%,white)]"
+                                }`}
+                              >
+                                <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--muted)]">
+                                  <span>
+                                    {message.role === "assistant" ? "Assistant" : "You"}
+                                  </span>
+                                  <span>{new Date(message.createdAt).toLocaleString()}</span>
+                                </div>
+                                <p className="whitespace-pre-wrap">{displayText}</p>
+                                {preview.truncated ? (
+                                  <button
+                                    onClick={() =>
+                                      setExpandedConversationMessages((prev) => ({
+                                        ...prev,
+                                        [message.id]: !prev[message.id],
+                                      }))
+                                    }
+                                    className="mt-2 text-xs uppercase tracking-[0.2em] text-[var(--secondary)]"
+                                  >
+                                    {expanded ? "View less" : "View more"}
+                                  </button>
+                                ) : null}
+                                {message.role === "assistant" ? (
+                                  <div className="mt-3">
+                                    <button
+                                      onClick={() => handleApplyAssistantSuggestion(message)}
+                                      disabled={applySuggestionLoadingId === message.id}
+                                      className="rounded-full border border-[var(--border)] px-4 py-2 text-xs uppercase tracking-[0.2em] text-[var(--foreground)] transition hover:bg-white/70 disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                      {applySuggestionLoadingId === message.id
+                                        ? "Applying suggestion..."
+                                        : "Apply suggestion"}
+                                    </button>
+                                  </div>
+                                ) : null}
+                              </div>
+                            );
+                          })()
+                        ))}
+                        {currentConversation.messages.length > 4 ? (
+                          <button
+                            onClick={() =>
+                              setShowAllConversationMessages((prev) => !prev)
+                            }
+                            className="text-xs uppercase tracking-[0.2em] text-[var(--secondary)]"
+                          >
+                            {showAllConversationMessages ? "Show less" : "Show more"}
+                          </button>
+                        ) : null}
+                      </>
+                    ) : (
+                      <p className="text-sm text-[var(--muted)]">
+                        No conversation yet. Ask about an error, warning, or desired improvement.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+            {currentEntry?.enhancements?.length ? (
+              <div className="mt-4 rounded-2xl border border-[var(--border)] bg-white/70 p-4">
+                <h4 className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
+                  Enhancement history
+                </h4>
+                <div className="mt-3 space-y-3">
+                  {visibleEnhancements.map((enhancement) => (
+                    (() => {
+                      const preview = buildPreview(enhancement.instruction, 180);
+                      const expanded = expandedEnhancements[enhancement.id];
+                      const displayText =
+                        expanded || !preview.truncated
+                          ? enhancement.instruction
+                          : preview.text;
+
+                      return (
+                        <div
+                          key={enhancement.id}
+                          className="rounded-xl border border-[var(--border)] bg-white/80 p-3 text-sm"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--muted)]">
+                            <span>{new Date(enhancement.createdAt).toLocaleString()}</span>
+                            <span>{enhancement.language}</span>
+                          </div>
+                          <p className="mt-2 font-medium whitespace-pre-wrap">{displayText}</p>
+                          {preview.truncated ? (
+                            <button
+                              onClick={() =>
+                                setExpandedEnhancements((prev) => ({
+                                  ...prev,
+                                  [enhancement.id]: !prev[enhancement.id],
+                                }))
+                              }
+                              className="mt-2 text-xs uppercase tracking-[0.2em] text-[var(--secondary)]"
+                            >
+                              {expanded ? "View less" : "View more"}
+                            </button>
+                          ) : null}
+                        </div>
+                      );
+                    })()
+                  ))}
+                  {currentEntry.enhancements.length > 4 ? (
+                    <button
+                      onClick={() => setShowAllEnhancements((prev) => !prev)}
+                      className="text-xs uppercase tracking-[0.2em] text-[var(--secondary)]"
+                    >
+                      {showAllEnhancements ? "Show less" : "Show more"}
+                    </button>
+                  ) : null}
                 </div>
               </div>
             ) : null}
@@ -995,7 +1696,7 @@ export default function Converter() {
             </div>
           ) : null}
         </div>
-        <div className="glass-card rounded-3xl p-6 md:p-10">
+        <div className="glass-card min-w-0 rounded-3xl p-6 md:p-10">
           <div className="flex items-center justify-between gap-3">
             <h2 className="text-2xl font-semibold">Recent conversions</h2>
             <span className="text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
@@ -1014,14 +1715,14 @@ export default function Converter() {
             </a>
           </div>
           <div className="mt-6 space-y-6">
-            {entries.length === 0 ? (
+            {groupedEntries.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-[var(--border)] p-6 text-sm text-[var(--muted)]">
                 No conversions yet. Paste SAS code to create your first entry.
               </div>
             ) : null}
-            {entries.map((entry) => (
+            {groupedEntries.map((group) => (
               <div
-                key={entry.id}
+                key={group.id}
                 className="rounded-2xl border border-[var(--border)] bg-white/80 p-5"
               >
                 <div className="flex items-start justify-between gap-3">
@@ -1031,58 +1732,27 @@ export default function Converter() {
                       onClick={() =>
                         setExpandedIds((prev) => ({
                           ...prev,
-                          [entry.id]: !prev[entry.id],
+                          [group.id]: !prev[group.id],
                         }))
                       }
                     >
-                      {entry.name}
+                      {group.name}
                     </button>
                     <p className="text-xs text-[var(--muted)]">
-                      {new Date(entry.createdAt).toLocaleString()}
+                      {new Date(group.createdAt).toLocaleString()}
+                    </p>
+                    <p className="mt-1 text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
+                      {group.entries.length} version{group.entries.length === 1 ? "" : "s"}
                     </p>
                   </div>
                   <button
                     className="rounded-full border border-[var(--border)] px-3 py-1 text-xs uppercase tracking-[0.2em] text-[var(--muted)]"
-                    onClick={async () => {
-                      setSasCode(entry.sasCode);
-                      setPythonCode(entry.pythonCode);
-                      setSavedPythonCode(entry.pythonCode);
-                      setExecuteResult(null);
-                      setExecuteError(null);
-                      setExecutionInputFiles([]);
-                      setUploadedSasFileName(null);
-                      setCurrentEntryId(entry.id);
-                      setName(entry.name);
-                      setLanguage(entry.language);
-                      setIsEditingCode(false);
-                      setSasAnalysisError(null);
-                      try {
-                        if (!sasAnalysisByEntry[entry.id]) {
-                          setSasAnalysisLoading(true);
-                          const analysis = await fetchSasAnalysis(
-                            entry.sasCode,
-                            entry.id,
-                          );
-                          setSasAnalysisByEntry((prev) => ({
-                            ...prev,
-                            [entry.id]: analysis,
-                          }));
-                        }
-                      } catch (error) {
-                        setSasAnalysisError(
-                          error instanceof Error
-                            ? error.message
-                            : "SAS analysis failed.",
-                        );
-                      } finally {
-                        setSasAnalysisLoading(false);
-                      }
-                    }}
+                    onClick={() => void handleViewEntry(group.entries[0])}
                   >
-                    View
+                    View latest
                   </button>
                 </div>
-                {expandedIds[entry.id] ? (
+                {expandedIds[group.id] ? (
                   <div className="mt-4 space-y-4">
                     <div>
                       <h4 className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
@@ -1090,65 +1760,89 @@ export default function Converter() {
                       </h4>
                       <div className="mt-2">
                         <CodeBlock
-                          code={entry.sasCode}
+                          code={group.sasCode}
                           language="sas"
                           maxHeight={144}
                         />
                       </div>
                     </div>
-                    <div>
-                      <h4 className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
-                        {entry.language === "R" ? "R Output" : "Python Output"}
-                      </h4>
-                      <div className="mt-2">
-                        <CodeBlock
-                          code={entry.pythonCode}
-                          language={entry.language === "R" ? "r" : "python"}
-                          maxHeight={144}
-                        />
-                      </div>
+                    <div className="space-y-4">
+                      {group.entries.map((entry) => (
+                        <div
+                          key={entry.id}
+                          className="rounded-xl border border-[var(--border)] bg-white/70 p-4"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-3">
+                            <div>
+                              <h4 className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
+                                {entry.language === "R" ? "R version" : "Python version"}
+                              </h4>
+                              <p className="mt-1 text-xs text-[var(--muted)]">
+                                {new Date(entry.createdAt).toLocaleString()}
+                              </p>
+                            </div>
+                            <button
+                              className="rounded-full border border-[var(--border)] px-3 py-1 text-xs uppercase tracking-[0.2em] text-[var(--muted)]"
+                              onClick={() => void handleViewEntry(entry)}
+                            >
+                              View
+                            </button>
+                          </div>
+                          <div className="mt-3">
+                            <CodeBlock
+                              code={entry.pythonCode}
+                              language={entry.language === "R" ? "r" : "python"}
+                              maxHeight={144}
+                            />
+                          </div>
+                          <div className="mt-4 space-y-3">
+                            <h4 className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
+                              Latest run
+                            </h4>
+                            {entry.runs.length === 0 ? (
+                              <p className="text-sm text-[var(--muted)]">
+                                No execution results saved yet.
+                              </p>
+                            ) : (
+                              <div className="rounded-xl border border-[var(--border)] bg-white/70 p-3 text-sm">
+                                <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--muted)]">
+                                  <span>{new Date(entry.runs[0].createdAt).toLocaleString()}</span>
+                                  <span>
+                                    Exit code {entry.runs[0].exitCode ?? "unknown"} in{" "}
+                                    {entry.runs[0].durationMs}ms
+                                    {entry.runs[0].timedOut ? " (timed out)" : ""}
+                                  </span>
+                                </div>
+                                <p className="mt-2 text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
+                                  Stdout
+                                </p>
+                                <div className="mt-2">
+                                  <CodeBlock
+                                    code={entry.runs[0].stdout || "(no output)"}
+                                    language="text"
+                                    maxHeight={144}
+                                    wrapLongLines
+                                  />
+                                </div>
+                                <p className="mt-3 text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
+                                  Stderr
+                                </p>
+                                <div className="mt-2">
+                                  <CodeBlock
+                                    code={entry.runs[0].stderr || "(no output)"}
+                                    language="text"
+                                    maxHeight={144}
+                                    wrapLongLines
+                                  />
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 ) : null}
-                <div className="mt-4 space-y-3">
-                  <h4 className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
-                    Reviews
-                  </h4>
-                  {entry.reviews.length === 0 ? (
-                    <p className="text-sm text-[var(--muted)]">
-                      No reviews yet. Add feedback from the workspace.
-                    </p>
-                  ) : (
-                    entry.reviews.map((review) => (
-                      <div
-                        key={review.id}
-                        className="rounded-xl border border-[var(--border)] bg-white/70 p-3 text-sm"
-                      >
-                        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--muted)]">
-                          <span>
-                            {review.reviewer?.name ||
-                              review.reviewer?.email ||
-                              "Reviewer"}
-                          </span>
-                          <span>
-                            {new Date(review.createdAt).toLocaleString()}
-                          </span>
-                        </div>
-                        {review.summary ? (
-                          <p className="mt-2 font-semibold">
-                            {review.summary}
-                          </p>
-                        ) : null}
-                        <p className="mt-1">{review.comments}</p>
-                        {review.rating ? (
-                          <p className="mt-2 text-xs text-[var(--muted)]">
-                            Rating: {review.rating}/5
-                          </p>
-                        ) : null}
-                      </div>
-                    ))
-                  )}
-                </div>
               </div>
             ))}
           </div>

@@ -388,11 +388,22 @@ export default function HistoryClient() {
                             >
                               {entry.name}
                             </button>
+                            <div className="mt-2">
+                              <span className="rounded-full border border-[var(--border)] bg-white/70 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
+                                {entry.language === "R" ? "R" : "Python"}
+                              </span>
+                            </div>
                             <p className="mt-1 text-xs text-[var(--muted)]">
                               {new Date(entry.createdAt).toLocaleString()}
                             </p>
                           </div>
                           <div className="flex flex-wrap items-center gap-3">
+                            <Link
+                              href={`/?entryId=${encodeURIComponent(entry.id)}`}
+                              className="rounded-full border border-[var(--border)] px-4 py-2 text-sm text-[var(--muted)] transition hover:bg-white/70"
+                            >
+                              View
+                            </Link>
                             <select
                               className="rounded-full border border-[var(--border)] bg-white/90 px-4 py-2 text-sm"
                               value={entry.projectId || ""}

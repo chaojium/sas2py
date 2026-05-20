@@ -5,6 +5,8 @@ import { basename, join } from "node:path";
 import { spawn } from "node:child_process";
 import {
   isAzureBlobUploadConfigured,
+  uploadBinaryToAzureAndGetSasUrl,
+  uploadTextToAzureAndGetSasUrl,
   uploadExecutionInputsToAzure,
 } from "@/lib/blobStorage";
 
@@ -65,6 +67,22 @@ type RawExecutionResult = {
   timedOut: boolean;
   durationMs: number;
   images: string[];
+  artifacts: RawExecutionArtifact[];
+};
+
+type RawExecutionArtifact = {
+  name: string;
+  contentType: string;
+  sizeBytes: number;
+  contentBase64: string;
+};
+
+export type ExecutionArtifact = {
+  name: string;
+  contentType: string;
+  sizeBytes: number;
+  downloadUrl?: string;
+  contentBase64?: string;
 };
 
 export type CodeExecutionResult = {
@@ -76,6 +94,7 @@ export type CodeExecutionResult = {
   detectedPackages: string[];
   policyMode: PackagePolicyMode;
   images: string[];
+  artifacts: ExecutionArtifact[];
   backend: ExecutionBackend;
 };
 
@@ -83,6 +102,28 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_OUTPUT_CHARS = 100_000;
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
 const DEFAULT_DATABRICKS_INPUT_FILE_MAX_BYTES = 256_000;
+const MAX_DATABRICKS_NOTEBOOK_PARAM_BYTES = 9_000;
+const DEFAULT_MAX_ARTIFACT_BYTES = 768_000;
+const DEFAULT_MAX_ARTIFACT_TOTAL_BYTES = 2_000_000;
+const DEFAULT_MAX_ARTIFACT_COUNT = 10;
+const ALLOWED_ARTIFACT_EXTENSIONS = new Set([
+  ".csv",
+  ".tsv",
+  ".txt",
+  ".json",
+  ".xlsx",
+  ".xls",
+  ".pdf",
+  ".png",
+  ".html",
+  ".htm",
+  ".parquet",
+  ".feather",
+  ".rds",
+  ".rdata",
+  ".pkl",
+  ".pickle",
+]);
 const DEFAULT_PYTHON_BLOCKLIST = [
   "subprocess",
   "socket",
@@ -272,6 +313,33 @@ function applyDatabricksBlobSetup(
   return `${setup}\n${code}`;
 }
 
+function buildDatabricksBlobBootstrapCode(
+  language: ExecutionLanguage,
+  codeUrl: string,
+) {
+  if (language === "R") {
+    return [
+      "sas2py_code_url <- " + JSON.stringify(codeUrl),
+      "sas2py_code_path <- tempfile('sas2py-code-', fileext = '.R')",
+      "download.file(sas2py_code_url, destfile = sas2py_code_path, mode = 'wb', quiet = TRUE)",
+      "sas2py_downloaded_lines <- readLines(sas2py_code_path, warn = FALSE, encoding = 'UTF-8')",
+      "eval(parse(text = paste(sas2py_downloaded_lines, collapse = '\\n')), envir = .GlobalEnv)",
+    ].join("\n");
+  }
+
+  return [
+    "import urllib.request as __sas2py_code_request",
+    "sas2py_code_url = " + JSON.stringify(codeUrl),
+    "with __sas2py_code_request.urlopen(sas2py_code_url) as __sas2py_code_response:",
+    "    __sas2py_downloaded_code = __sas2py_code_response.read().decode('utf-8')",
+    "exec(compile(__sas2py_downloaded_code, '<sas2py-blob-runner>', 'exec'), {'__name__': '__main__'})",
+  ].join("\n");
+}
+
+function byteLengthUtf8(value: string) {
+  return Buffer.byteLength(value, "utf8");
+}
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -416,12 +484,29 @@ function validatePackagePolicy(code: string, language: ExecutionLanguage) {
 function buildPythonExecutionEnvelope(code: string) {
   const escaped = JSON.stringify(code);
   const marker = "__SAS2PY_RESULT__";
+  const maxArtifactBytes = parsePositiveInt(
+    process.env.CODE_RUNNER_MAX_ARTIFACT_BYTES,
+    DEFAULT_MAX_ARTIFACT_BYTES,
+  );
+  const maxArtifactTotalBytes = parsePositiveInt(
+    process.env.CODE_RUNNER_MAX_ARTIFACT_TOTAL_BYTES,
+    DEFAULT_MAX_ARTIFACT_TOTAL_BYTES,
+  );
+  const maxArtifactCount = parsePositiveInt(
+    process.env.CODE_RUNNER_MAX_ARTIFACT_COUNT,
+    DEFAULT_MAX_ARTIFACT_COUNT,
+  );
+  const allowedExtensions = JSON.stringify([...ALLOWED_ARTIFACT_EXTENSIONS]);
   return [
     "import base64 as __sas2py_b64",
     "import ast as __sas2py_ast",
     "import io as __sas2py_io",
     "import json as __sas2py_json",
+    "import mimetypes as __sas2py_mimetypes",
+    "import os as __sas2py_os",
+    "from pathlib import Path as __sas2py_Path",
     "import sys as __sas2py_sys",
+    "import tempfile as __sas2py_tempfile",
     "import traceback as __sas2py_traceback",
     "from contextlib import redirect_stderr as __sas2py_redirect_stderr, redirect_stdout as __sas2py_redirect_stdout",
     "__sas2py_user_code = " + escaped,
@@ -430,7 +515,14 @@ function buildPythonExecutionEnvelope(code: string) {
     "__sas2py_stderr = __sas2py_io.StringIO()",
     "__sas2py_error = ''",
     "__sas2py_images = []",
+    "__sas2py_artifacts = []",
     "__sas2py_seen_figs = set()",
+    "__sas2py_allowed_artifact_extensions = set(" + allowedExtensions + ")",
+    "__sas2py_max_artifact_bytes = " + String(maxArtifactBytes),
+    "__sas2py_max_artifact_total_bytes = " + String(maxArtifactTotalBytes),
+    "__sas2py_max_artifact_count = " + String(maxArtifactCount),
+    "__sas2py_mpl_config_dir = __sas2py_tempfile.mkdtemp(prefix='sas2py-mpl-')",
+    "__sas2py_os.environ['MPLCONFIGDIR'] = __sas2py_mpl_config_dir",
     "def __sas2py_render_value(__value):",
     "    if __value is None:",
     "        return",
@@ -467,6 +559,58 @@ function buildPythonExecutionEnvelope(code: string) {
     "        __images.append(__b64.b64encode(__sas2py_buf.getvalue()).decode('ascii'))",
     "        __seen.add(__sas2py_fig_num)",
     "        __sas2py_buf.close()",
+    "def __sas2py_snapshot_files(__Path=__sas2py_Path):",
+    "    __snapshot = {}",
+    "    __root = __Path.cwd()",
+    "    for __path in __root.rglob('*'):",
+    "        try:",
+    "            if not __path.is_file():",
+    "                continue",
+    "            if any(__part in {'.git', '__pycache__'} for __part in __path.parts):",
+    "                continue",
+    "            __relative = __path.relative_to(__root).as_posix()",
+    "            __stat = __path.stat()",
+    "            __snapshot[__relative] = (__stat.st_size, __stat.st_mtime_ns)",
+    "        except Exception:",
+    "            continue",
+    "    return __snapshot",
+    "def __sas2py_collect_artifacts(__before, __Path=__sas2py_Path, __mimetypes=__sas2py_mimetypes, __b64=__sas2py_b64):",
+    "    __artifacts = []",
+    "    __total_bytes = 0",
+    "    __root = __Path.cwd()",
+    "    for __path in sorted(__root.rglob('*')):",
+    "        try:",
+    "            if not __path.is_file():",
+    "                continue",
+    "            if any(__part in {'.git', '__pycache__'} for __part in __path.parts):",
+    "                continue",
+    "            __relative = __path.relative_to(__root).as_posix()",
+    "            __suffix = __path.suffix.lower()",
+    "            if __suffix not in __sas2py_allowed_artifact_extensions:",
+    "                continue",
+    "            __stat = __path.stat()",
+    "            __previous = __before.get(__relative)",
+    "            if __previous == (__stat.st_size, __stat.st_mtime_ns):",
+    "                continue",
+    "            if __stat.st_size <= 0 or __stat.st_size > __sas2py_max_artifact_bytes:",
+    "                continue",
+    "            if len(__artifacts) >= __sas2py_max_artifact_count:",
+    "                break",
+    "            if __total_bytes + __stat.st_size > __sas2py_max_artifact_total_bytes:",
+    "                break",
+    "            __content = __path.read_bytes()",
+    "            __content_type = __mimetypes.guess_type(__path.name)[0] or 'application/octet-stream'",
+    "            __artifacts.append({",
+    "                'name': __relative,",
+    "                'contentType': __content_type,",
+    "                'sizeBytes': __stat.st_size,",
+    "                'contentBase64': __b64.b64encode(__content).decode('ascii'),",
+    "            })",
+    "            __total_bytes += __stat.st_size",
+    "        except Exception:",
+    "            continue",
+    "    return __artifacts",
+    "__sas2py_before_files = __sas2py_snapshot_files()",
     "try:",
     "    import matplotlib.pyplot as __sas2py_plt",
     "    __sas2py_original_show = __sas2py_plt.show",
@@ -495,6 +639,7 @@ function buildPythonExecutionEnvelope(code: string) {
     "    except Exception:",
     "        pass",
     "__sas2py_capture_figures()",
+    "__sas2py_artifacts = __sas2py_collect_artifacts(__sas2py_before_files)",
     "try:",
     "    import matplotlib.pyplot as __sas2py_plt",
     "    __sas2py_plt.close('all')",
@@ -504,6 +649,7 @@ function buildPythonExecutionEnvelope(code: string) {
     "    'stdout': __sas2py_stdout.getvalue(),",
     "    'stderr': __sas2py_stderr.getvalue() + (('\\n' + __sas2py_error) if __sas2py_error else ''),",
     "    'images': __sas2py_images,",
+    "    'artifacts': __sas2py_artifacts,",
     "}",
     `print('${marker}' + __sas2py_json.dumps(__sas2py_payload))`,
   ].join("\n");
@@ -512,6 +658,21 @@ function buildPythonExecutionEnvelope(code: string) {
 function buildRExecutionEnvelope(code: string) {
   const escaped = JSON.stringify(sanitizeRSource(code));
   const marker = "__SAS2PY_RESULT__";
+  const maxArtifactBytes = parsePositiveInt(
+    process.env.CODE_RUNNER_MAX_ARTIFACT_BYTES,
+    DEFAULT_MAX_ARTIFACT_BYTES,
+  );
+  const maxArtifactTotalBytes = parsePositiveInt(
+    process.env.CODE_RUNNER_MAX_ARTIFACT_TOTAL_BYTES,
+    DEFAULT_MAX_ARTIFACT_TOTAL_BYTES,
+  );
+  const maxArtifactCount = parsePositiveInt(
+    process.env.CODE_RUNNER_MAX_ARTIFACT_COUNT,
+    DEFAULT_MAX_ARTIFACT_COUNT,
+  );
+  const allowedExtensionsLiteral = `c(${[...ALLOWED_ARTIFACT_EXTENSIONS]
+    .map((extension) => JSON.stringify(extension))
+    .join(", ")})`;
   return [
     "sas2py_user_code <- " + escaped,
     "sas2py_stdout <- character()",
@@ -596,6 +757,76 @@ function buildRExecutionEnvelope(code: string) {
     "  if (!length(values)) return('[]')",
     "  paste0('[', paste(vapply(values, sas2py_json_string, character(1)), collapse = ','), ']')",
     "}",
+    "sas2py_json_artifact <- function(item) {",
+    "  paste0(",
+    "    '{',",
+    "    '\"name\":', sas2py_json_string(item$name), ',',",
+    "    '\"contentType\":', sas2py_json_string(item$contentType), ',',",
+    "    '\"sizeBytes\":', as.character(item$sizeBytes), ',',",
+    "    '\"contentBase64\":', sas2py_json_string(item$contentBase64),",
+    "    '}'",
+    "  )",
+    "}",
+    "sas2py_json_artifact_array <- function(items) {",
+    "  if (!length(items)) return('[]')",
+    "  paste0('[', paste(vapply(items, sas2py_json_artifact, character(1)), collapse = ','), ']')",
+    "}",
+    "sas2py_allowed_artifact_extensions <- " + allowedExtensionsLiteral,
+    "sas2py_max_artifact_bytes <- " + String(maxArtifactBytes),
+    "sas2py_max_artifact_total_bytes <- " + String(maxArtifactTotalBytes),
+    "sas2py_max_artifact_count <- " + String(maxArtifactCount),
+    "sas2py_guess_content_type <- function(path) {",
+    "  extension <- tolower(tools::file_ext(path))",
+    "  switch(extension,",
+    "    csv = 'text/csv',",
+    "    tsv = 'text/tab-separated-values',",
+    "    txt = 'text/plain',",
+    "    json = 'application/json',",
+    "    xlsx = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',",
+    "    xls = 'application/vnd.ms-excel',",
+    "    pdf = 'application/pdf',",
+    "    png = 'image/png',",
+    "    html = 'text/html',",
+    "    htm = 'text/html',",
+    "    'application/octet-stream'",
+    "  )",
+    "}",
+    "sas2py_snapshot_files <- function() {",
+    "  files <- list.files('.', recursive = TRUE, all.files = TRUE, no.. = TRUE, full.names = FALSE, include.dirs = FALSE)",
+    "  if (!length(files)) return(setNames(character(), character()))",
+    "  files <- files[!grepl('(^|/)(\\\\.git|__pycache__)(/|$)', files)]",
+    "  if (!length(files)) return(setNames(character(), character()))",
+    "  info <- file.info(files)",
+    "  values <- paste0(ifelse(is.na(info$size), 0, info$size), '|', ifelse(is.na(info$mtime), '', format(info$mtime, '%Y-%m-%dT%H:%M:%OS6', tz = 'UTC')))",
+    "  setNames(values, rownames(info))",
+    "}",
+    "sas2py_collect_artifacts <- function(before) {",
+    "  files <- list.files('.', recursive = TRUE, all.files = TRUE, no.. = TRUE, full.names = FALSE, include.dirs = FALSE)",
+    "  files <- sort(files[!grepl('(^|/)(\\\\.git|__pycache__)(/|$)', files)])",
+    "  if (!length(files)) return(list())",
+    "  total_bytes <- 0",
+    "  artifacts <- list()",
+    "  for (path in files) {",
+    "    extension <- tolower(paste0('.', tools::file_ext(path)))",
+    "    if (!(extension %in% sas2py_allowed_artifact_extensions)) next",
+    "    info <- file.info(path)",
+    "    if (is.na(info$size) || info$size <= 0 || info$size > sas2py_max_artifact_bytes) next",
+    "    current_value <- paste0(info$size, '|', format(info$mtime, '%Y-%m-%dT%H:%M:%OS6', tz = 'UTC'))",
+    "    previous_value <- before[[path]]",
+    "    if (!is.null(previous_value) && identical(previous_value, current_value)) next",
+    "    if (length(artifacts) >= sas2py_max_artifact_count) break",
+    "    if (total_bytes + info$size > sas2py_max_artifact_total_bytes) break",
+    "    artifacts[[length(artifacts) + 1]] <- list(",
+    "      name = path,",
+    "      contentType = sas2py_guess_content_type(path),",
+    "      sizeBytes = unname(as.integer(info$size)),",
+    "      contentBase64 = sas2py_base64_encode(readBin(path, what = 'raw', n = info$size))",
+    "    )",
+    "    total_bytes <- total_bytes + info$size",
+    "  }",
+    "  artifacts",
+    "}",
+    "sas2py_before_files <- sas2py_snapshot_files()",
     "tryCatch(",
     "  {",
     "    sas2py_exec_with_notebook_tail(sas2py_user_code)",
@@ -618,11 +849,13 @@ function buildRExecutionEnvelope(code: string) {
     "    }, character(1))",
     "  }",
     "}",
+    "sas2py_artifacts <- sas2py_collect_artifacts(sas2py_before_files)",
     "sas2py_payload <- paste0(",
     "  '{',",
     "  '\"stdout\":', sas2py_json_string(sas2py_stdout), ',',",
     "  '\"stderr\":', sas2py_json_string(sas2py_stderr), ',',",
-    "  '\"images\":', sas2py_json_array(sas2py_images),",
+    "  '\"images\":', sas2py_json_array(sas2py_images), ',',",
+    "  '\"artifacts\":', sas2py_json_artifact_array(sas2py_artifacts),",
     "  '}'",
     ")",
     `cat('${marker}', sas2py_payload, sep = '')`,
@@ -631,27 +864,114 @@ function buildRExecutionEnvelope(code: string) {
 
 function parseExecutionEnvelope(output: string) {
   const marker = "__SAS2PY_RESULT__";
-  const index = output.lastIndexOf(marker);
-  if (index < 0) return null;
+  let current = output;
+  let aggregatePrefix = "";
+  let aggregateStderr = "";
+  let aggregateImages: string[] = [];
+  let aggregateArtifacts: RawExecutionArtifact[] = [];
 
-  const prefix = output.slice(0, index).trim();
-  const rawJson = output.slice(index + marker.length).trim();
-  try {
-    const parsed = JSON.parse(rawJson) as {
-      stdout?: string;
-      stderr?: string;
-      images?: string[];
-    };
-    return {
-      stdout: `${prefix}${prefix && parsed.stdout ? "\n" : ""}${parsed.stdout || ""}`.trim(),
-      stderr: parsed.stderr || "",
-      images: Array.isArray(parsed.images)
-        ? parsed.images.filter((value) => typeof value === "string" && value.length > 0)
-        : [],
-    };
-  } catch {
+  while (true) {
+    const index = current.lastIndexOf(marker);
+    if (index < 0) {
+      break;
+    }
+
+    const prefix = current.slice(0, index).trim();
+    const rawJson = current.slice(index + marker.length).trim();
+
+    try {
+      const parsed = JSON.parse(rawJson) as {
+        stdout?: string;
+        stderr?: string;
+        images?: string[];
+        artifacts?: RawExecutionArtifact[];
+      };
+      if (prefix) {
+        aggregatePrefix = `${aggregatePrefix}${aggregatePrefix ? "\n" : ""}${prefix}`;
+      }
+      if (parsed.stderr) {
+        aggregateStderr = `${aggregateStderr}${aggregateStderr && parsed.stderr ? "\n" : ""}${parsed.stderr}`;
+      }
+      if (Array.isArray(parsed.images)) {
+        aggregateImages = aggregateImages.concat(
+          parsed.images.filter((value) => typeof value === "string" && value.length > 0),
+        );
+      }
+      if (Array.isArray(parsed.artifacts)) {
+        aggregateArtifacts = aggregateArtifacts.concat(
+          parsed.artifacts.filter(
+            (value): value is RawExecutionArtifact =>
+              Boolean(
+                value &&
+                  typeof value.name === "string" &&
+                  typeof value.contentType === "string" &&
+                  Number.isFinite(value.sizeBytes) &&
+                  typeof value.contentBase64 === "string",
+              ),
+          ),
+        );
+      }
+      current = parsed.stdout || "";
+    } catch {
+      return null;
+    }
+  }
+
+  if (
+    !aggregatePrefix &&
+    !aggregateStderr &&
+    aggregateImages.length === 0 &&
+    aggregateArtifacts.length === 0 &&
+    current === output
+  ) {
     return null;
   }
+
+  return {
+    stdout: `${aggregatePrefix}${aggregatePrefix && current ? "\n" : ""}${current}`.trim(),
+    stderr: aggregateStderr,
+    images: aggregateImages,
+    artifacts: aggregateArtifacts,
+  };
+}
+
+async function materializeExecutionArtifacts(
+  artifacts: RawExecutionArtifact[],
+): Promise<ExecutionArtifact[]> {
+  const normalized = artifacts.filter(
+    (artifact) =>
+      artifact.name.trim().length > 0 &&
+      artifact.contentBase64.trim().length > 0 &&
+      artifact.sizeBytes > 0,
+  );
+  if (normalized.length === 0) {
+    return [];
+  }
+
+  if (!isAzureBlobUploadConfigured()) {
+    return normalized.map((artifact) => ({
+      name: artifact.name,
+      contentType: artifact.contentType,
+      sizeBytes: artifact.sizeBytes,
+      contentBase64: artifact.contentBase64,
+    }));
+  }
+
+  return Promise.all(
+    normalized.map(async (artifact) => {
+      const uploaded = await uploadBinaryToAzureAndGetSasUrl({
+        fileName: sanitizeUploadName(artifact.name),
+        content: Buffer.from(artifact.contentBase64, "base64"),
+        contentType: artifact.contentType,
+      });
+      return {
+        name: artifact.name,
+        contentType: artifact.contentType,
+        sizeBytes: artifact.sizeBytes,
+        downloadUrl: uploaded.url,
+      } satisfies ExecutionArtifact;
+    }),
+  );
 }
 
 function getDatabricksConfig(language: ExecutionLanguage) {
@@ -823,7 +1143,16 @@ async function buildDatabricksPayloadCode(
         content: file.content,
       })),
     );
-    return applyDatabricksBlobSetup(basePayloadCode, language, uploadedFiles);
+    const payload = applyDatabricksBlobSetup(basePayloadCode, language, uploadedFiles);
+    if (byteLengthUtf8(payload) <= MAX_DATABRICKS_NOTEBOOK_PARAM_BYTES) {
+      return payload;
+    }
+    const uploadedCode = await uploadTextToAzureAndGetSasUrl({
+      fileName: language === "R" ? "sas2py-runner.R" : "sas2py-runner.py",
+      content: payload,
+      contentType: "text/plain; charset=utf-8",
+    });
+    return buildDatabricksBlobBootstrapCode(language, uploadedCode.url);
   }
   if (inputFiles.length > 0) {
     const databricksInputFileMaxBytes = parsePositiveInt(
@@ -839,9 +1168,36 @@ async function buildDatabricksPayloadCode(
         `Uploaded input files are too large for Databricks notebook parameters (${totalInputBytes} bytes). Limit is ${databricksInputFileMaxBytes} bytes. Configure Azure Blob Storage for Databricks file handoff, or use the docker runner.`,
       );
     }
-    return applyDatabricksInputSetup(basePayloadCode, language, inputFiles);
+    const payload = applyDatabricksInputSetup(basePayloadCode, language, inputFiles);
+    if (byteLengthUtf8(payload) <= MAX_DATABRICKS_NOTEBOOK_PARAM_BYTES) {
+      return payload;
+    }
+    if (!isAzureBlobUploadConfigured()) {
+      throw new Error(
+        `Databricks notebook parameter payload is too large (${byteLengthUtf8(payload)} bytes). Configure Azure Blob Storage so the code payload can be offloaded, or shorten the code/input files.`,
+      );
+    }
+    const uploadedCode = await uploadTextToAzureAndGetSasUrl({
+      fileName: language === "R" ? "sas2py-runner.R" : "sas2py-runner.py",
+      content: payload,
+      contentType: "text/plain; charset=utf-8",
+    });
+    return buildDatabricksBlobBootstrapCode(language, uploadedCode.url);
   }
-  return basePayloadCode;
+  if (byteLengthUtf8(basePayloadCode) <= MAX_DATABRICKS_NOTEBOOK_PARAM_BYTES) {
+    return basePayloadCode;
+  }
+  if (!isAzureBlobUploadConfigured()) {
+    throw new Error(
+      `Databricks notebook parameter payload is too large (${byteLengthUtf8(basePayloadCode)} bytes). Configure Azure Blob Storage so the code payload can be offloaded, or shorten the generated code.`,
+    );
+  }
+  const uploadedCode = await uploadTextToAzureAndGetSasUrl({
+    fileName: language === "R" ? "sas2py-runner.R" : "sas2py-runner.py",
+    content: basePayloadCode,
+    contentType: "text/plain; charset=utf-8",
+  });
+  return buildDatabricksBlobBootstrapCode(language, uploadedCode.url);
 }
 
 async function submitDatabricksRun(
@@ -850,6 +1206,18 @@ async function submitDatabricksRun(
 ) {
   const jobId = getJobId(language);
   const { baseUrl, token } = getDatabricksConfig(language);
+  const notebookParams: Record<string, string> = { code: payloadCode };
+  if (language === "R") {
+    const packages = splitByComma(process.env.CODE_RUNNER_DATABRICKS_R_PACKAGES)
+      .join(",");
+    if (packages) {
+      notebookParams.packages = packages;
+    }
+    const cranRepo = process.env.CODE_RUNNER_DATABRICKS_R_CRAN_REPO?.trim();
+    if (cranRepo) {
+      notebookParams.cran_repo = cranRepo;
+    }
+  }
   const submit = await databricksApi<{ run_id: number }>(
     baseUrl,
     token,
@@ -858,7 +1226,7 @@ async function submitDatabricksRun(
       method: "POST",
       body: JSON.stringify({
         job_id: jobId,
-        notebook_params: { code: payloadCode },
+        notebook_params: notebookParams,
       }),
     },
   );
@@ -898,6 +1266,7 @@ async function fetchDatabricksRunStatus(
         timedOut: true,
         durationMs: Date.now() - startedAt,
         images: [],
+        artifacts: [],
       },
     } satisfies DatabricksExecutionStatus;
   }
@@ -922,6 +1291,7 @@ async function fetchDatabricksRunStatus(
   let stdout = "";
   let stderr = "";
   let images: string[] = [];
+  let artifacts: RawExecutionArtifact[] = [];
   try {
     const output = await getOutputWithTaskFallback(
       baseUrl,
@@ -945,6 +1315,7 @@ async function fetchDatabricksRunStatus(
       stdout = parsed.stdout;
       stderr = `${stderr}${stderr && parsed.stderr ? "\n" : ""}${parsed.stderr}`;
       images = parsed.images;
+      artifacts = parsed.artifacts;
     }
   }
 
@@ -964,6 +1335,7 @@ async function fetchDatabricksRunStatus(
       timedOut: false,
       durationMs: Date.now() - startedAt,
       images,
+      artifacts,
     },
   } satisfies DatabricksExecutionStatus;
 }
@@ -1013,6 +1385,7 @@ export async function getDatabricksExecutionStatus(
       timedOut: status.result.timedOut,
       durationMs: status.result.durationMs,
       images: status.result.images,
+      artifacts: await materializeExecutionArtifacts(status.result.artifacts),
       detectedPackages: handle.detectedPackages,
       policyMode: handle.policyMode,
       backend: "databricks" as const,
@@ -1047,6 +1420,7 @@ async function runCodeInDatabricks(
         timedOut: true,
         durationMs: Date.now() - startedAt,
         images: [],
+        artifacts: [],
       } satisfies RawExecutionResult;
     }
     await sleep(pollIntervalMs);
@@ -1170,12 +1544,14 @@ async function runCodeInDocker(
       void (workspace ? rm(workspace.rootDir, { recursive: true, force: true }) : Promise.resolve());
 
       let images: string[] = [];
+      let artifacts: RawExecutionArtifact[] = [];
       if (stdout) {
         const parsed = parseExecutionEnvelope(stdout);
         if (parsed) {
           stdout = parsed.stdout;
           stderr = `${stderr}${stderr && parsed.stderr ? "\n" : ""}${parsed.stderr}`;
           images = parsed.images;
+          artifacts = parsed.artifacts;
         }
       }
 
@@ -1190,6 +1566,7 @@ async function runCodeInDocker(
         timedOut,
         durationMs: Date.now() - startedAt,
         images,
+        artifacts,
       });
     });
 
@@ -1233,6 +1610,7 @@ export async function runCodeInContainer(
           inputFiles,
         )
       : await runCodeInDocker(code, language, timeoutMs, inputFiles);
+  const artifacts = await materializeExecutionArtifacts(rawResult.artifacts);
 
   return {
     stdout: truncateOutput(rawResult.stdout, maxOutputChars),
@@ -1243,6 +1621,7 @@ export async function runCodeInContainer(
     detectedPackages,
     policyMode: mode,
     images: rawResult.images,
+    artifacts,
     backend,
   } satisfies CodeExecutionResult;
 }

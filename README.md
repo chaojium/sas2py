@@ -172,8 +172,8 @@ Set these optional `.env` variables to tune the runner:
 - `CODE_RUNNER_DATABRICKS_R_HOST` (optional; use this when R runs in a different Databricks workspace/account)
 - `CODE_RUNNER_DATABRICKS_R_TOKEN` (optional; token for the R runner workspace/account)
 - `AZURE_STORAGE_CONNECTION_STRING` (optional; enables Blob handoff for Databricks input files)
-- `AZURE_STORAGE_ACCOUNT_NAME` (required with `AZURE_STORAGE_ACCOUNT_KEY` to generate SAS URLs)
-- `AZURE_STORAGE_ACCOUNT_KEY` (required with `AZURE_STORAGE_ACCOUNT_NAME` to generate SAS URLs)
+- `AZURE_STORAGE_ACCOUNT_NAME` (required for managed identity / Entra ID blob access, or with `AZURE_STORAGE_ACCOUNT_KEY` for shared-key access)
+- `AZURE_STORAGE_ACCOUNT_KEY` (optional; shared-key fallback for local or non-Azure deployments)
 - `AZURE_STORAGE_CONTAINER` (default: `sas2py-inputs`)
 - `AZURE_STORAGE_BLOB_PREFIX` (default: `execution-inputs`)
 - `CODE_RUNNER_TIMEOUT_MS` (default: `120000`)
@@ -190,6 +190,15 @@ Job contract:
 
 - Configure each Databricks job to accept a notebook parameter named `code`.
 - The notebook should execute that code and return a result string via `dbutils.notebook.exit(...)` for stdout-like output.
+
+Azure Web App Blob auth:
+
+- For Azure-hosted deployment, prefer managed identity / Entra ID over storage account keys.
+- Set `AZURE_STORAGE_ACCOUNT_NAME`, `AZURE_STORAGE_CONTAINER`, and `AZURE_STORAGE_BLOB_PREFIX`.
+- Grant the Web App identity:
+  - `Storage Blob Data Contributor`
+  - `Storage Blob Delegator`
+- The app will then upload blobs and generate user-delegation SAS URLs without `AZURE_STORAGE_ACCOUNT_KEY`.
 - If a job has multiple tasks, set the corresponding `..._TASK_KEY` so output retrieval targets the correct task.
 - If Python and R run in different Databricks workspaces, set the corresponding `..._HOST` and `..._TOKEN` values for each language.
 - For uploaded execution input files with Databricks, configure Azure Blob Storage in the app. The backend uploads files to Blob, injects short-lived SAS URLs into the generated `code` payload, and the payload downloads files into `SAS2PY_INPUT_DIR` before the user code runs.
