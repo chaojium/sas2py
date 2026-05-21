@@ -100,29 +100,20 @@ Set these in `.env`:
 
 ## Auth
 
-This project uses Firebase Authentication.
+This project uses `next-auth` with email/password credentials stored in PostgreSQL through Prisma.
 
 Set these in `.env`:
 
-- `NEXT_PUBLIC_FIREBASE_API_KEY`
-- `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN`
-- `NEXT_PUBLIC_FIREBASE_PROJECT_ID`
-- `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET`
-- `NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID`
-- `NEXT_PUBLIC_FIREBASE_APP_ID`
-- `NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID` (optional)
+- `DATABASE_URL`
+- `NEXTAUTH_SECRET`
+- `NEXTAUTH_URL`
 
 The app supports:
 
 - Email and password sign-in
-- Google sign-in
+- Self-service account creation
 
-In Firebase Console, enable both providers under Authentication.
-
-For local development behind a corporate TLS proxy, you can temporarily set
-`DEV_AUTH_BYPASS=true` to trust Firebase token payloads without server-side
-signature verification. This should only be used in local development, never in
-production.
+Before starting the app, apply the Prisma migrations so the auth tables and `User.passwordHash` column exist.
 
 If Azure OpenAI requests fail with `self-signed certificate in certificate chain`,
 configure Node to trust your corporate CA. You can either set

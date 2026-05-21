@@ -1,16 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import {
-  createUserWithEmailAndPassword,
-  sendPasswordResetEmail,
-  signInWithEmailAndPassword,
-  signInWithPopup,
-} from "firebase/auth";
+import { signIn } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
 import { useAuth } from "@/components/AuthProvider";
-import { firebaseAuth, googleProvider } from "@/lib/firebase/client";
 
 export default function SignInPage() {
   const router = useRouter();
@@ -36,54 +30,38 @@ export default function SignInPage() {
 
     try {
       if (mode === "signup") {
-        await createUserWithEmailAndPassword(firebaseAuth, email, password);
-      } else {
-        await signInWithEmailAndPassword(firebaseAuth, email, password);
+        const signupResponse = await fetch("/api/auth/signup", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ email, password }),
+        });
+        const signupData = await signupResponse.json();
+
+        if (!signupResponse.ok) {
+          throw new Error(signupData?.error || "Unable to create account.");
+        }
       }
+
+      const result = await signIn("credentials", {
+        email,
+        password,
+        redirect: false,
+      });
+
+      if (result?.error) {
+        throw new Error("Invalid email or password.");
+      }
+
+      if (!result?.ok) {
+        throw new Error("Authentication failed.");
+      }
+
       router.replace("/");
     } catch (authError) {
       setError(
         authError instanceof Error ? authError.message : "Authentication failed.",
-      );
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function handleGoogleSignIn() {
-    setLoading(true);
-    setError(null);
-    setMessage(null);
-
-    try {
-      googleProvider.setCustomParameters({ prompt: "select_account" });
-      await signInWithPopup(firebaseAuth, googleProvider);
-      router.replace("/");
-    } catch (authError) {
-      if (
-        authError instanceof Error &&
-        !authError.message.includes("auth/popup-closed-by-user")
-      ) {
-        setError(authError.message);
-      }
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function handlePasswordReset() {
-    setLoading(true);
-    setError(null);
-    setMessage(null);
-
-    try {
-      await sendPasswordResetEmail(firebaseAuth, email);
-      setMessage("Password reset email sent. Check your inbox for the next step.");
-    } catch (authError) {
-      setError(
-        authError instanceof Error
-          ? authError.message
-          : "Unable to send password reset email.",
       );
     } finally {
       setLoading(false);
@@ -115,7 +93,7 @@ export default function SignInPage() {
                 Continue with your team identity
               </h2>
               <p className="mt-2 text-sm text-[var(--muted)]">
-                Sign in with email and password or use Google.
+                Use your internal email and password.
               </p>
             </div>
             <div className="flex w-full max-w-md flex-col gap-4">
@@ -148,7 +126,7 @@ export default function SignInPage() {
                   type="email"
                   value={email}
                   onChange={(event) => setEmail(event.target.value)}
-                  placeholder="you@gmail.com"
+                  placeholder="you@company.gov"
                   required
                   className="rounded-2xl border border-[var(--border)] bg-white/80 px-4 py-3 text-sm shadow-inner focus:outline-none focus:ring-2 focus:ring-[var(--secondary)]"
                 />
@@ -157,20 +135,10 @@ export default function SignInPage() {
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
                   placeholder="Password"
-                  minLength={6}
+                  minLength={8}
                   required
                   className="rounded-2xl border border-[var(--border)] bg-white/80 px-4 py-3 text-sm shadow-inner focus:outline-none focus:ring-2 focus:ring-[var(--secondary)]"
                 />
-                {mode === "signin" ? (
-                  <button
-                    type="button"
-                    onClick={() => void handlePasswordReset()}
-                    disabled={loading || !email}
-                    className="self-start text-sm font-medium text-[var(--foreground)] underline underline-offset-4 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Forgot password?
-                  </button>
-                ) : null}
                 <button
                   type="submit"
                   disabled={loading}
@@ -183,18 +151,14 @@ export default function SignInPage() {
                       : "Sign in with email"}
                 </button>
               </form>
-              <button
-                type="button"
-                onClick={() => void handleGoogleSignIn()}
-                disabled={loading}
-                className="inline-flex items-center justify-center rounded-full border border-[var(--border)] px-5 py-2.5 text-sm font-semibold transition hover:bg-white/60 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                Continue with Google
-              </button>
               {message ? (
                 <p className="text-sm text-emerald-700">{message}</p>
               ) : null}
               {error ? <p className="text-sm text-red-600">{error}</p> : null}
+              <p className="text-xs text-[var(--muted)]">
+                Password reset and SSO are not enabled in this internal
+                deployment.
+              </p>
             </div>
           </div>
         </section>

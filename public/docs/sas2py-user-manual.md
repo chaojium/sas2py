@@ -21,7 +21,7 @@ Most application features require authentication.
 Supported sign-in methods:
 
 - Email and password
-- Google sign-in
+- Internal account creation and sign-in
 
 Authentication is required for:
 

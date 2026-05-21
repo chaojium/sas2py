@@ -1,12 +1,11 @@
 "use client";
 
-import { updateProfile } from "firebase/auth";
 import { useEffect, useState, type FormEvent } from "react";
 import AuthButton from "@/components/AuthButton";
 import { useAuth } from "@/components/AuthProvider";
 
 export default function SettingsClient() {
-  const { user, status } = useAuth();
+  const { user, status, refreshUser } = useAuth();
   const [displayName, setDisplayName] = useState("");
   const [savedName, setSavedName] = useState("");
   const [message, setMessage] = useState<string | null>(null);
@@ -39,8 +38,20 @@ export default function SettingsClient() {
     setMessage(null);
 
     try {
-      await updateProfile(user, { displayName: nextName });
-      await user.getIdToken(true);
+      const response = await fetch("/api/auth/profile", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ name: nextName }),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data?.error || "Unable to update profile.");
+      }
+
+      await refreshUser();
       setDisplayName(nextName);
       setSavedName(nextName);
       setMessage("Profile name updated.");

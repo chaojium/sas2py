@@ -1,7 +1,7 @@
 const pdfHref = "/docs/sas2py-documentation.pdf";
 
 const quickStart = [
-  "Sign in with email/password or Google.",
+  "Sign in with your internal email/password account.",
   "Open Studio and enter a required conversion name.",
   "Choose Python or R as the target language.",
   "Paste SAS code or upload a `.sas` file.",
@@ -21,7 +21,7 @@ const manualSections = [
     title: "Access and sign-in",
     body: [
       "Authentication is required for the main workspace, dashboard, history, project management, execution history, and profile settings.",
-      "The current sign-in flow supports email/password and Google sign-in through Firebase Authentication.",
+      "The current sign-in flow supports internal email/password accounts stored in the application database.",
     ],
   },
   {
