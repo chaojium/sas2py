@@ -1375,9 +1375,11 @@ async function buildDatabricksPayloadCode(
           basePayloadCode,
           language,
           uploadedFiles.filter(
-            (file): file is { name: string; url: string } =>
-              typeof file.url === "string" && file.url.length > 0,
-          ),
+            (file) => typeof file.url === "string" && file.url.length > 0,
+          ).map((file) => ({
+            name: file.name,
+            url: file.url as string,
+          })),
         );
     if (byteLengthUtf8(payload) <= MAX_DATABRICKS_NOTEBOOK_PARAM_BYTES) {
       return payload;
