@@ -12,12 +12,13 @@ import { randomUUID } from "node:crypto";
 
 type UploadedExecutionInput = {
   name: string;
-  url: string;
+  url?: string;
+  blobName: string;
 };
 
 type UploadedBlobReference = {
   blobName: string;
-  url: string;
+  url?: string;
 };
 
 type KeyAuthConfig = {
@@ -90,6 +91,15 @@ export function isAzureBlobUploadConfigured() {
       getAccountConfig() ||
       getClientSecretConfig() ||
       getIdentityConfig(),
+  );
+}
+
+export function shouldAvoidSasUrls() {
+  return Boolean(
+    process.env.AZURE_STORAGE_DISABLE_SAS?.trim() === "true" ||
+      (getClientSecretConfig() &&
+        !process.env.AZURE_STORAGE_CONNECTION_STRING?.trim() &&
+        !getAccountConfig()),
   );
 }
 
@@ -216,12 +226,15 @@ export async function uploadExecutionInputsToAzure(
 
       return {
         name: file.name,
-        url: await buildReadSasUrl({
-          blobClient,
-          containerName,
-          blobName,
-          expiresInMinutes,
-        }),
+        blobName,
+        url: shouldAvoidSasUrls()
+          ? undefined
+          : await buildReadSasUrl({
+              blobClient,
+              containerName,
+              blobName,
+              expiresInMinutes,
+            }),
       } satisfies UploadedExecutionInput;
     }),
   );
@@ -250,12 +263,14 @@ export async function uploadTextToAzureAndGetSasUrl(params: {
 
   return {
     blobName,
-    url: await buildReadSasUrl({
-      blobClient,
-      containerName,
-      blobName,
-      expiresInMinutes: params.expiresInMinutes || 60,
-    }),
+    url: shouldAvoidSasUrls()
+      ? undefined
+      : await buildReadSasUrl({
+          blobClient,
+          containerName,
+          blobName,
+          expiresInMinutes: params.expiresInMinutes || 60,
+        }),
   } satisfies UploadedBlobReference;
 }
 
@@ -280,11 +295,13 @@ export async function uploadBinaryToAzureAndGetSasUrl(params: {
 
   return {
     blobName,
-    url: await buildReadSasUrl({
-      blobClient,
-      containerName,
-      blobName,
-      expiresInMinutes: params.expiresInMinutes || 60,
-    }),
+    url: shouldAvoidSasUrls()
+      ? undefined
+      : await buildReadSasUrl({
+          blobClient,
+          containerName,
+          blobName,
+          expiresInMinutes: params.expiresInMinutes || 60,
+        }),
   } satisfies UploadedBlobReference;
 }

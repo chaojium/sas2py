@@ -5,6 +5,7 @@ import { basename, join } from "node:path";
 import { spawn } from "node:child_process";
 import {
   isAzureBlobUploadConfigured,
+  shouldAvoidSasUrls,
   uploadBinaryToAzureAndGetSasUrl,
   uploadTextToAzureAndGetSasUrl,
   uploadExecutionInputsToAzure,
@@ -227,6 +228,85 @@ function buildPythonDatabricksBlobSetup(
   ].join("\n");
 }
 
+type DatabricksBlobPathConfig = {
+  accountName: string;
+  containerName: string;
+  tenantId: string;
+  clientId: string;
+  clientSecret: string;
+};
+
+function getDatabricksBlobPathConfig(): DatabricksBlobPathConfig | null {
+  const accountName = process.env.AZURE_STORAGE_ACCOUNT_NAME?.trim();
+  const containerName = process.env.AZURE_STORAGE_CONTAINER?.trim();
+  const tenantId = process.env.AZURE_TENANT_ID?.trim();
+  const clientId = process.env.AZURE_CLIENT_ID?.trim();
+  const clientSecret = process.env.AZURE_CLIENT_SECRET?.trim();
+  if (!accountName || !containerName || !tenantId || !clientId || !clientSecret) {
+    return null;
+  }
+  return {
+    accountName,
+    containerName,
+    tenantId,
+    clientId,
+    clientSecret,
+  };
+}
+
+function buildBlobUrlFromName(config: DatabricksBlobPathConfig, blobName: string) {
+  return `https://${config.accountName}.blob.core.windows.net/${config.containerName}/${blobName}`;
+}
+
+function buildPythonOAuthBlobDownloader(config: DatabricksBlobPathConfig) {
+  return [
+    "import json as __sas2py_blob_json",
+    "import urllib.parse as __sas2py_blob_parse",
+    "import urllib.request as __sas2py_blob_request",
+    "def __sas2py_blob_token():",
+    "    __sas2py_payload = __sas2py_blob_parse.urlencode({",
+    "        'grant_type': 'client_credentials',",
+    `        'client_id': ${JSON.stringify(config.clientId)},`,
+    `        'client_secret': ${JSON.stringify(config.clientSecret)},`,
+    "        'scope': 'https://storage.azure.com/.default',",
+    "    }).encode('utf-8')",
+    `    __sas2py_request = __sas2py_blob_request.Request('https://login.microsoftonline.com/${config.tenantId}/oauth2/v2.0/token', data=__sas2py_payload, headers={'Content-Type': 'application/x-www-form-urlencoded'})`,
+    "    with __sas2py_blob_request.urlopen(__sas2py_request) as __sas2py_response:",
+    "        return __sas2py_blob_json.loads(__sas2py_response.read().decode('utf-8'))['access_token']",
+    "def __sas2py_blob_download(__sas2py_url, __sas2py_destination):",
+    "    __sas2py_token = __sas2py_blob_token()",
+    "    __sas2py_request = __sas2py_blob_request.Request(__sas2py_url, headers={'Authorization': f'Bearer {__sas2py_token}', 'x-ms-version': '2023-11-03'})",
+    "    with __sas2py_blob_request.urlopen(__sas2py_request) as __sas2py_response, open(__sas2py_destination, 'wb') as __sas2py_handle:",
+    "        __sas2py_handle.write(__sas2py_response.read())",
+  ].join("\n");
+}
+
+function buildPythonDatabricksDirectBlobSetup(
+  inputFiles: { name: string; blobName: string }[],
+  config: DatabricksBlobPathConfig,
+) {
+  if (inputFiles.length === 0) return "";
+  const escaped = JSON.stringify(
+    inputFiles.map((file) => ({
+      name: sanitizeUploadName(file.name),
+      url: buildBlobUrlFromName(config, file.blobName),
+    })),
+  );
+  return [
+    buildPythonOAuthBlobDownloader(config),
+    "import os as __sas2py_input_os",
+    "import tempfile as __sas2py_input_tempfile",
+    "__sas2py_input_dir = __sas2py_input_tempfile.mkdtemp(prefix='sas2py-input-')",
+    "__sas2py_input_files = " + escaped,
+    "__sas2py_input_os.makedirs(__sas2py_input_dir, exist_ok=True)",
+    "__sas2py_input_os.environ['SAS2PY_INPUT_DIR'] = __sas2py_input_dir",
+    "__sas2py_input_os.chdir(__sas2py_input_dir)",
+    "for __sas2py_file in __sas2py_input_files:",
+    "    __sas2py_path = __sas2py_input_os.path.join(__sas2py_input_dir, __sas2py_file['name'])",
+    "    __sas2py_blob_download(__sas2py_file['url'], __sas2py_path)",
+  ].join("\n");
+}
+
 function buildRDatabricksInputSetup(inputFiles: ExecutionInputFile[]) {
   if (inputFiles.length === 0) return "";
   const fileListLiteral = `list(${inputFiles
@@ -287,6 +367,65 @@ function buildRDatabricksBlobSetup(inputFiles: { name: string; url: string }[]) 
   ].join("\n");
 }
 
+function buildRDatabricksDirectBlobSetup(
+  inputFiles: { name: string; blobName: string }[],
+  config: DatabricksBlobPathConfig,
+) {
+  if (inputFiles.length === 0) return "";
+  const pythonScript = [
+    "import json",
+    "import os",
+    "import sys",
+    "import urllib.parse",
+    "import urllib.request",
+    `TENANT_ID = ${JSON.stringify(config.tenantId)}`,
+    `CLIENT_ID = ${JSON.stringify(config.clientId)}`,
+    `CLIENT_SECRET = ${JSON.stringify(config.clientSecret)}`,
+    "def token():",
+    "    payload = urllib.parse.urlencode({",
+    "        'grant_type': 'client_credentials',",
+    "        'client_id': CLIENT_ID,",
+    "        'client_secret': CLIENT_SECRET,",
+    "        'scope': 'https://storage.azure.com/.default',",
+    "    }).encode('utf-8')",
+    "    req = urllib.request.Request(f'https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token', data=payload, headers={'Content-Type': 'application/x-www-form-urlencoded'})",
+    "    with urllib.request.urlopen(req) as resp:",
+    "        return json.loads(resp.read().decode('utf-8'))['access_token']",
+    "def download(url, destination):",
+    "    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token()}', 'x-ms-version': '2023-11-03'})",
+    "    with urllib.request.urlopen(req) as resp, open(destination, 'wb') as handle:",
+    "        handle.write(resp.read())",
+    "if __name__ == '__main__':",
+    "    payload = json.loads(sys.argv[1])",
+    "    target_dir = sys.argv[2]",
+    "    os.makedirs(target_dir, exist_ok=True)",
+    "    for item in payload:",
+    "        download(item['url'], os.path.join(target_dir, item['name']))",
+  ].join("\n");
+  const pythonPayload = JSON.stringify(
+    inputFiles.map((file) => ({
+      name: sanitizeUploadName(file.name),
+      url: buildBlobUrlFromName(config, file.blobName),
+    })),
+  );
+  return [
+    "sas2py_input_dir <- tempfile('sas2py-input-')",
+    "dir.create(sas2py_input_dir, recursive = TRUE, showWarnings = FALSE)",
+    "Sys.setenv(SAS2PY_INPUT_DIR = sas2py_input_dir)",
+    "setwd(sas2py_input_dir)",
+    `sas2py_python_script <- ${JSON.stringify(pythonScript)}`,
+    `sas2py_python_payload <- ${JSON.stringify(pythonPayload)}`,
+    "sas2py_python_path <- tempfile('sas2py-blob-download-', fileext = '.py')",
+    "writeLines(sas2py_python_script, sas2py_python_path, useBytes = TRUE)",
+    "sas2py_python_bin <- Sys.which('python3')",
+    "if (sas2py_python_bin == '') sas2py_python_bin <- Sys.which('python')",
+    "if (sas2py_python_bin == '') stop('Python runtime is required for Azure blob download bootstrap.')",
+    "sas2py_status <- system2(sas2py_python_bin, c(sas2py_python_path, sas2py_python_payload, sas2py_input_dir), stdout = TRUE, stderr = TRUE)",
+    "sas2py_exit <- attr(sas2py_status, 'status')",
+    "if (!is.null(sas2py_exit) && sas2py_exit != 0) stop(paste(sas2py_status, collapse='\\n'))",
+  ].join("\n");
+}
+
 function applyDatabricksInputSetup(
   code: string,
   language: ExecutionLanguage,
@@ -313,6 +452,20 @@ function applyDatabricksBlobSetup(
   return `${setup}\n${code}`;
 }
 
+function applyDatabricksDirectBlobSetup(
+  code: string,
+  language: ExecutionLanguage,
+  inputFiles: { name: string; blobName: string }[],
+  config: DatabricksBlobPathConfig,
+) {
+  if (inputFiles.length === 0) return code;
+  const setup =
+    language === "R"
+      ? buildRDatabricksDirectBlobSetup(inputFiles, config)
+      : buildPythonDatabricksDirectBlobSetup(inputFiles, config);
+  return `${setup}\n${code}`;
+}
+
 function buildDatabricksBlobBootstrapCode(
   language: ExecutionLanguage,
   codeUrl: string,
@@ -332,6 +485,63 @@ function buildDatabricksBlobBootstrapCode(
     "sas2py_code_url = " + JSON.stringify(codeUrl),
     "with __sas2py_code_request.urlopen(sas2py_code_url) as __sas2py_code_response:",
     "    __sas2py_downloaded_code = __sas2py_code_response.read().decode('utf-8')",
+    "exec(compile(__sas2py_downloaded_code, '<sas2py-blob-runner>', 'exec'), {'__name__': '__main__'})",
+  ].join("\n");
+}
+
+function buildDatabricksDirectBlobBootstrapCode(
+  language: ExecutionLanguage,
+  blobName: string,
+  config: DatabricksBlobPathConfig,
+) {
+  const codeUrl = buildBlobUrlFromName(config, blobName);
+  if (language === "R") {
+    const pythonScript = [
+      "import json",
+      "import sys",
+      "import urllib.parse",
+      "import urllib.request",
+      `TENANT_ID = ${JSON.stringify(config.tenantId)}`,
+      `CLIENT_ID = ${JSON.stringify(config.clientId)}`,
+      `CLIENT_SECRET = ${JSON.stringify(config.clientSecret)}`,
+      "payload = urllib.parse.urlencode({",
+      "    'grant_type': 'client_credentials',",
+      "    'client_id': CLIENT_ID,",
+      "    'client_secret': CLIENT_SECRET,",
+      "    'scope': 'https://storage.azure.com/.default',",
+      "}).encode('utf-8')",
+      "req = urllib.request.Request(f'https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token', data=payload, headers={'Content-Type': 'application/x-www-form-urlencoded'})",
+      "with urllib.request.urlopen(req) as resp:",
+      "    token = json.loads(resp.read().decode('utf-8'))['access_token']",
+      "download_req = urllib.request.Request(sys.argv[1], headers={'Authorization': f'Bearer {token}', 'x-ms-version': '2023-11-03'})",
+      "with urllib.request.urlopen(download_req) as resp, open(sys.argv[2], 'wb') as handle:",
+      "    handle.write(resp.read())",
+    ].join("\n");
+    return [
+      `sas2py_code_url <- ${JSON.stringify(codeUrl)}`,
+      "sas2py_code_path <- tempfile('sas2py-code-', fileext = '.R')",
+      `sas2py_python_script <- ${JSON.stringify(pythonScript)}`,
+      "sas2py_python_path <- tempfile('sas2py-blob-code-', fileext = '.py')",
+      "writeLines(sas2py_python_script, sas2py_python_path, useBytes = TRUE)",
+      "sas2py_python_bin <- Sys.which('python3')",
+      "if (sas2py_python_bin == '') sas2py_python_bin <- Sys.which('python')",
+      "if (sas2py_python_bin == '') stop('Python runtime is required for Azure blob download bootstrap.')",
+      "sas2py_status <- system2(sas2py_python_bin, c(sas2py_python_path, sas2py_code_url, sas2py_code_path), stdout = TRUE, stderr = TRUE)",
+      "sas2py_exit <- attr(sas2py_status, 'status')",
+      "if (!is.null(sas2py_exit) && sas2py_exit != 0) stop(paste(sas2py_status, collapse='\\n'))",
+      "sas2py_downloaded_lines <- readLines(sas2py_code_path, warn = FALSE, encoding = 'UTF-8')",
+      "eval(parse(text = paste(sas2py_downloaded_lines, collapse = '\\n')), envir = .GlobalEnv)",
+    ].join("\n");
+  }
+
+  return [
+    buildPythonOAuthBlobDownloader(config),
+    "import tempfile as __sas2py_code_tempfile",
+    "sas2py_code_url = " + JSON.stringify(codeUrl),
+    "sas2py_code_path = __sas2py_code_tempfile.mktemp(prefix='sas2py-code-', suffix='.py')",
+    "__sas2py_blob_download(sas2py_code_url, sas2py_code_path)",
+    "with open(sas2py_code_path, 'r', encoding='utf-8') as __sas2py_code_handle:",
+    "    __sas2py_downloaded_code = __sas2py_code_handle.read()",
     "exec(compile(__sas2py_downloaded_code, '<sas2py-blob-runner>', 'exec'), {'__name__': '__main__'})",
   ].join("\n");
 }
@@ -957,6 +1167,15 @@ async function materializeExecutionArtifacts(
     }));
   }
 
+  if (shouldAvoidSasUrls()) {
+    return normalized.map((artifact) => ({
+      name: artifact.name,
+      contentType: artifact.contentType,
+      sizeBytes: artifact.sizeBytes,
+      contentBase64: artifact.contentBase64,
+    }));
+  }
+
   return Promise.all(
     normalized.map(async (artifact) => {
       const uploaded = await uploadBinaryToAzureAndGetSasUrl({
@@ -1136,6 +1355,8 @@ async function buildDatabricksPayloadCode(
     language === "PYTHON"
       ? buildPythonExecutionEnvelope(code)
       : buildRExecutionEnvelope(code);
+  const directBlobConfig =
+    shouldAvoidSasUrls() ? getDatabricksBlobPathConfig() : null;
   if (inputFiles.length > 0 && isAzureBlobUploadConfigured()) {
     const uploadedFiles = await uploadExecutionInputsToAzure(
       inputFiles.map((file) => ({
@@ -1143,7 +1364,21 @@ async function buildDatabricksPayloadCode(
         content: file.content,
       })),
     );
-    const payload = applyDatabricksBlobSetup(basePayloadCode, language, uploadedFiles);
+    const payload = directBlobConfig
+      ? applyDatabricksDirectBlobSetup(
+          basePayloadCode,
+          language,
+          uploadedFiles,
+          directBlobConfig,
+        )
+      : applyDatabricksBlobSetup(
+          basePayloadCode,
+          language,
+          uploadedFiles.filter(
+            (file): file is { name: string; url: string } =>
+              typeof file.url === "string" && file.url.length > 0,
+          ),
+        );
     if (byteLengthUtf8(payload) <= MAX_DATABRICKS_NOTEBOOK_PARAM_BYTES) {
       return payload;
     }
@@ -1152,6 +1387,16 @@ async function buildDatabricksPayloadCode(
       content: payload,
       contentType: "text/plain; charset=utf-8",
     });
+    if (directBlobConfig) {
+      return buildDatabricksDirectBlobBootstrapCode(
+        language,
+        uploadedCode.blobName,
+        directBlobConfig,
+      );
+    }
+    if (!uploadedCode.url) {
+      throw new Error("Azure blob upload succeeded, but no SAS URL was returned.");
+    }
     return buildDatabricksBlobBootstrapCode(language, uploadedCode.url);
   }
   if (inputFiles.length > 0) {
@@ -1182,6 +1427,16 @@ async function buildDatabricksPayloadCode(
       content: payload,
       contentType: "text/plain; charset=utf-8",
     });
+    if (directBlobConfig) {
+      return buildDatabricksDirectBlobBootstrapCode(
+        language,
+        uploadedCode.blobName,
+        directBlobConfig,
+      );
+    }
+    if (!uploadedCode.url) {
+      throw new Error("Azure blob upload succeeded, but no SAS URL was returned.");
+    }
     return buildDatabricksBlobBootstrapCode(language, uploadedCode.url);
   }
   if (byteLengthUtf8(basePayloadCode) <= MAX_DATABRICKS_NOTEBOOK_PARAM_BYTES) {
@@ -1197,6 +1452,16 @@ async function buildDatabricksPayloadCode(
     content: basePayloadCode,
     contentType: "text/plain; charset=utf-8",
   });
+  if (directBlobConfig) {
+    return buildDatabricksDirectBlobBootstrapCode(
+      language,
+      uploadedCode.blobName,
+      directBlobConfig,
+    );
+  }
+  if (!uploadedCode.url) {
+    throw new Error("Azure blob upload succeeded, but no SAS URL was returned.");
+  }
   return buildDatabricksBlobBootstrapCode(language, uploadedCode.url);
 }
 
