@@ -312,8 +312,10 @@ export default function Converter() {
     if (!isAuthed) return;
     const response = await authFetch("/api/conversions");
     if (!response.ok) return;
-    const data = await response.json();
-    setEntries(data.entries || []);
+    const { data } = await parseApiResponse<{
+      entries?: Entry[];
+    }>(response);
+    setEntries(data?.entries || []);
   }, [isAuthed]);
 
   useEffect(() => {
@@ -325,11 +327,16 @@ export default function Converter() {
       const response = await authFetch(
         `/api/conversations?codeEntryId=${encodeURIComponent(entryId)}`,
       );
-      const data = await response.json();
+      const { data, text } = await parseApiResponse<{
+        conversations?: ConversationThread[];
+        error?: string;
+      }>(response);
       if (!response.ok) {
-        throw new Error(data?.error || "Conversation history failed to load.");
+        throw new Error(
+          data?.error || text || "Conversation history failed to load.",
+        );
       }
-      const conversations = (data.conversations || []) as ConversationThread[];
+      const conversations = (data?.conversations || []) as ConversationThread[];
       setConversationThreads((prev) => ({
         ...prev,
         [entryId]: conversations,
@@ -378,9 +385,20 @@ export default function Converter() {
           referenceUrl,
         }),
       });
-      const data = (await response.json()) as ConvertApiResponse;
+      const { data, text } = await parseApiResponse<ConvertApiResponse>(
+        response,
+      );
       if (!response.ok) {
-        throw new Error(data?.error || "Conversion failed.");
+        throw new Error(
+          data?.error ||
+            text ||
+            `Conversion failed with status ${response.status}.`,
+        );
+      }
+      if (!data?.entry) {
+        throw new Error(
+          text || "Conversion returned an empty or invalid response.",
+        );
       }
       setPythonCode(data.entry.pythonCode);
       setSavedPythonCode(data.entry.pythonCode);
@@ -720,9 +738,15 @@ export default function Converter() {
         sasCode: sourceSasCode,
       }),
     });
-    const data = await response.json();
+    const { data, text } = await parseApiResponse<{
+      analysis?: SasAnalysis;
+      error?: string;
+    }>(response);
     if (!response.ok) {
-      throw new Error(data?.error || "SAS analysis failed.");
+      throw new Error(data?.error || text || "SAS analysis failed.");
+    }
+    if (!data?.analysis) {
+      throw new Error(text || "SAS analysis returned an invalid response.");
     }
     return data.analysis as SasAnalysis;
   };

@@ -606,6 +606,6 @@ allperc = pd.concat(
 # proc print data=allperc;
 # run;
 print(allperc)
-allperc.to_csv(Path(__file__).with_name("allperc_python_sudaan_like.csv"), index=False)
+allperc.to_csv("allperc_python_sudaan_like.csv", index=False)
 
 # Quit;

@@ -10,6 +10,10 @@ import { getAuthUser } from "@/lib/firebase/server";
 import { randomUUID } from "node:crypto";
 
 export const runtime = "nodejs";
+export const maxDuration = 300;
+
+const AUTO_ANALYSIS_MAX_LINES = 200;
+const AUTO_ANALYSIS_MAX_CHARS = 20_000;
 
 type EnhancementRow = {
   id: string;
@@ -21,6 +25,27 @@ type EnhancementRow = {
   updated_code: string;
   created_at: string;
 };
+
+function shouldAutoAnalyzeSas(sasCode: string) {
+  const lineCount = sasCode.split(/\r\n|\r|\n/).length;
+  return (
+    lineCount <= AUTO_ANALYSIS_MAX_LINES &&
+    sasCode.length <= AUTO_ANALYSIS_MAX_CHARS
+  );
+}
+
+async function maybeAnalyzeSasCode(sasCode: string) {
+  if (!shouldAutoAnalyzeSas(sasCode)) {
+    return undefined;
+  }
+
+  try {
+    return await analyzeSasCode(sasCode);
+  } catch (error) {
+    console.warn("Skipping automatic SAS analysis:", error);
+    return undefined;
+  }
+}
 
 export async function GET(request: Request) {
   const user = await getAuthUser(request);
@@ -228,7 +253,7 @@ export async function POST(request: Request) {
       );
       const existing = existingRows[0];
       if (existing) {
-        const sasAnalysis = await analyzeSasCode(sasCode);
+        const sasAnalysis = await maybeAnalyzeSasCode(sasCode);
         return NextResponse.json({
           entry: {
             id: existing.id,
@@ -257,7 +282,7 @@ export async function POST(request: Request) {
             additionalGuidance,
             referenceUrl,
           }),
-      analyzeSasCode(sasCode),
+      maybeAnalyzeSasCode(sasCode),
     ]);
     const id = randomUUID();
     await execute(

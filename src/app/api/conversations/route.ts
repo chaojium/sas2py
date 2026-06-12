@@ -5,6 +5,7 @@ import { execute, table } from "@/lib/databricks";
 import { getAuthUser } from "@/lib/firebase/server";
 
 export const runtime = "nodejs";
+export const maxDuration = 300;
 
 type ConversationRow = {
   id: string;

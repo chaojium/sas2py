@@ -93,9 +93,9 @@ Set these in `.env`:
 - `APIM_SUBSCRIPTION_KEY`
 - `AZURE_OPENAI_SCOPE`
 - `AZURE_OPENAI_ENDPOINT`
-- `AZURE_OPENAI_MODEL` (default: `gpt5.1-dgw-default`)
+- `AZURE_OPENAI_MODEL` (default: `gpt5.5-dgw-default`)
 - `AZURE_OPENAI_API_VERSION` (default: `2025-03-01-preview`)
-- `OPENAI_TIMEOUT_MS` (default: `90000`)
+- `OPENAI_TIMEOUT_MS` (default: `300000`)
 - `OPENAI_CA_CERT_PATH` (optional PEM file for corporate TLS interception)
 
 ## Auth

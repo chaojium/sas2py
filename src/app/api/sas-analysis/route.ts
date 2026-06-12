@@ -4,6 +4,7 @@ import { execute, table } from "@/lib/databricks";
 import { getAuthUser } from "@/lib/firebase/server";
 
 export const runtime = "nodejs";
+export const maxDuration = 300;
 
 export async function POST(request: Request) {
   const user = await getAuthUser(request);

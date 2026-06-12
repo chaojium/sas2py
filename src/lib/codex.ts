@@ -5,8 +5,8 @@ import { ClientSecretCredential, getBearerTokenProvider } from "@azure/identity"
 import { AzureOpenAI } from "openai";
 import type { ClientOptions } from "openai";
 
-const DEFAULT_TIMEOUT_MS = 90_000;
-const DEFAULT_OPENAI_MODEL = "gpt5.1-dgw-default";
+const DEFAULT_TIMEOUT_MS = 300_000;
+const DEFAULT_OPENAI_MODEL = "gpt5.5-dgw-default";
 const DEFAULT_AZURE_OPENAI_API_VERSION = "2025-03-01-preview";
 type OpenAITask = "conversion" | "analysis" | "conversation";
 
