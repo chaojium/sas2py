@@ -1,0 +1,32 @@
+I already have correct point estimates and correct N_ACT values that match SAS.
+
+I ONLY want to fix the 95% confidence interval calculation to match SAS/SUDAAN.
+
+IMPORTANT CONSTRAINTS (do not violate):
+
+Do NOT change how N_ACT is calculated
+N_ACT must remain the unweighted count of non-missing analyte values within the domain
+Do NOT use weights for N_ACT
+Do NOT drop additional rows
+Do NOT change domain filtering logic
+Keep existing domain mask exactly as is
+Do NOT subset data differently
+Do NOT change weighted percentile calculation for point estimates
+ONLY modify the confidence interval portion
+CI must follow SAS NHANES macro logic:
+Korn & Graubard method
+Taylor linearization using PSU (sdmvpsu) and strata (sdmvstra)
+Use design=WR assumptions
+Use weighted indicator variable (Step 2 in SAS macro)
+Use beta distribution for CI limits
+Match SAS rounding behavior:
+Round L95, U95, and PT to 1 decimal BEFORE final percentile estimation
+Keep all intermediate variables and dataset structure unchanged
+
+Goal:
+
+Keep N_ACT identical to SAS
+Keep point estimates identical
+Only adjust CI so results match SAS as closely as possible
+
+Do not rewrite the whole function — only fix the CI-related steps.

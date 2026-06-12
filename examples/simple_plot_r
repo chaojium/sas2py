@@ -1,0 +1,42 @@
+library(readxl)
+library(dplyr)
+library(ggplot2)
+
+mydata <- read_excel(
+  path = "sample_data.xlsx",
+  sheet = "Sheet1",
+  .name_repair = "minimal"
+)
+
+names(mydata) <- tolower(names(mydata))
+
+print(mydata)
+
+if ("month" %in% names(mydata)) {
+  month_chr <- trimws(as.character(mydata[["month"]]))
+  month_clean <- tools::toTitleCase(tolower(month_chr))
+
+  month_num <- match(month_clean, month.name)
+
+  missing_full <- is.na(month_num)
+  month_num[missing_full] <- match(month_clean[missing_full], month.abb)
+
+  mydata[["month"]] <- factor(
+    month.abb[month_num],
+    levels = month.abb,
+    ordered = TRUE
+  )
+}
+
+str(mydata[["month"]])
+levels(mydata[["month"]])
+
+ggplot(mydata, aes(x = month, y = sales, group = 1)) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "Monthly Sales Plot",
+    x = "Month",
+    y = "Sales"
+  ) +
+  theme_minimal()
