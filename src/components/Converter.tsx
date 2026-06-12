@@ -616,6 +616,49 @@ export default function Converter() {
     URL.revokeObjectURL(url);
   };
 
+  const getExecutionOutputFileName = (kind: "stdout" | "stderr") => {
+    const rawName =
+      currentEntry?.name?.trim() ||
+      name.trim() ||
+      uploadedSasFileName?.replace(/\.sas$/i, "").trim() ||
+      "execution_output";
+    const safeName = rawName.replace(/[^\w.-]+/g, "_");
+    return `${safeName}.${kind}.txt`;
+  };
+
+  const handleCopyExecutionOutput = (text: string) => {
+    navigator.clipboard.writeText(text || "(no output)");
+  };
+
+  const handlePasteExecutionOutputToPrompt = (
+    kind: "stdout" | "stderr",
+    text: string,
+  ) => {
+    const label = kind === "stdout" ? "STDOUT" : "STDERR";
+    const content = text || "(no output)";
+    setConversationPrompt((previous) => {
+      const prefix = previous.trim() ? `${previous.trim()}\n\n` : "";
+      return `${prefix}${label}:\n${content}`;
+    });
+  };
+
+  const handleDownloadExecutionOutput = (
+    kind: "stdout" | "stderr",
+    text: string,
+  ) => {
+    const blob = new Blob([text || "(no output)"], {
+      type: "text/plain;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = getExecutionOutputFileName(kind);
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  };
+
   const handleExecute = async () => {
     if (!pythonCode.trim()) {
       setExecuteError("No generated code to run.");
@@ -1197,7 +1240,7 @@ export default function Converter() {
                 disabled={!canConvert}
                 className="rounded-full bg-[var(--primary)] px-6 py-2.5 text-sm font-semibold text-white transition hover:translate-y-[-1px] disabled:cursor-not-allowed disabled:opacity-50"
               >
-              {loading ? "Running GPT-5.2..." : "Convert"}
+              {loading ? "Running GPT-5.5..." : "Convert"}
             </button>
               <button
                 onClick={() => {
@@ -1282,7 +1325,7 @@ export default function Converter() {
                 <CodeBlock
                   code={
                     pythonCode ||
-                    `Your converted ${language === "R" ? "R" : "Python"} will appear here once GPT-5.2 finishes the translation.`
+                    `Your converted ${language === "R" ? "R" : "Python"} will appear here once GPT-5.5 finishes the translation.`
                   }
                   language={language === "R" ? "r" : "python"}
                   maxHeight={320}
@@ -1375,9 +1418,43 @@ export default function Converter() {
                 </div>
                 <div className="mt-3 space-y-3">
                   <div>
-                    <p className="mb-1 text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
-                      Stdout
-                    </p>
+                    <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
+                        Stdout
+                      </p>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          onClick={() =>
+                            handleCopyExecutionOutput(executeResult.stdout)
+                          }
+                          className="rounded-full border border-[var(--border)] px-3 py-1 text-xs uppercase tracking-[0.2em] text-[var(--muted)]"
+                        >
+                          Copy
+                        </button>
+                        <button
+                          onClick={() =>
+                            handlePasteExecutionOutputToPrompt(
+                              "stdout",
+                              executeResult.stdout,
+                            )
+                          }
+                          className="rounded-full border border-[var(--border)] px-3 py-1 text-xs uppercase tracking-[0.2em] text-[var(--muted)]"
+                        >
+                          Paste to prompt
+                        </button>
+                        <button
+                          onClick={() =>
+                            handleDownloadExecutionOutput(
+                              "stdout",
+                              executeResult.stdout,
+                            )
+                          }
+                          className="rounded-full border border-[var(--border)] px-3 py-1 text-xs uppercase tracking-[0.2em] text-[var(--muted)]"
+                        >
+                          Download
+                        </button>
+                      </div>
+                    </div>
                     <CodeBlock
                       code={executeResult.stdout || "(no output)"}
                       language="text"
@@ -1386,9 +1463,43 @@ export default function Converter() {
                     />
                   </div>
                   <div>
-                    <p className="mb-1 text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
-                      Stderr
-                    </p>
+                    <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
+                        Stderr
+                      </p>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          onClick={() =>
+                            handleCopyExecutionOutput(executeResult.stderr)
+                          }
+                          className="rounded-full border border-[var(--border)] px-3 py-1 text-xs uppercase tracking-[0.2em] text-[var(--muted)]"
+                        >
+                          Copy
+                        </button>
+                        <button
+                          onClick={() =>
+                            handlePasteExecutionOutputToPrompt(
+                              "stderr",
+                              executeResult.stderr,
+                            )
+                          }
+                          className="rounded-full border border-[var(--border)] px-3 py-1 text-xs uppercase tracking-[0.2em] text-[var(--muted)]"
+                        >
+                          Paste to prompt
+                        </button>
+                        <button
+                          onClick={() =>
+                            handleDownloadExecutionOutput(
+                              "stderr",
+                              executeResult.stderr,
+                            )
+                          }
+                          className="rounded-full border border-[var(--border)] px-3 py-1 text-xs uppercase tracking-[0.2em] text-[var(--muted)]"
+                        >
+                          Download
+                        </button>
+                      </div>
+                    </div>
                     <CodeBlock
                       code={executeResult.stderr || "(no output)"}
                       language="text"
