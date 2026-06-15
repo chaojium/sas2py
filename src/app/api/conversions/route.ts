@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { execute, table } from "@/lib/databricks";
 import {
-  analyzeSasCode,
   convertSasToPythonWithContext,
   convertSasToRWithContext,
   refineConversion,
@@ -11,9 +10,6 @@ import { randomUUID } from "node:crypto";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
-
-const AUTO_ANALYSIS_MAX_LINES = 200;
-const AUTO_ANALYSIS_MAX_CHARS = 20_000;
 
 type EnhancementRow = {
   id: string;
@@ -26,25 +22,16 @@ type EnhancementRow = {
   created_at: string;
 };
 
-function shouldAutoAnalyzeSas(sasCode: string) {
-  const lineCount = sasCode.split(/\r\n|\r|\n/).length;
-  return (
-    lineCount <= AUTO_ANALYSIS_MAX_LINES &&
-    sasCode.length <= AUTO_ANALYSIS_MAX_CHARS
-  );
-}
-
-async function maybeAnalyzeSasCode(sasCode: string) {
-  if (!shouldAutoAnalyzeSas(sasCode)) {
-    return undefined;
-  }
-
-  try {
-    return await analyzeSasCode(sasCode);
-  } catch (error) {
-    console.warn("Skipping automatic SAS analysis:", error);
-    return undefined;
-  }
+function getRequestError(error: unknown, fallback: string) {
+  const message = error instanceof Error ? error.message : fallback;
+  return {
+    message,
+    status: /^Generated (?:R|Python) failed validation before saving\./.test(
+      message,
+    )
+      ? 422
+      : 500,
+  };
 }
 
 export async function GET(request: Request) {
@@ -253,7 +240,6 @@ export async function POST(request: Request) {
       );
       const existing = existingRows[0];
       if (existing) {
-        const sasAnalysis = await maybeAnalyzeSasCode(sasCode);
         return NextResponse.json({
           entry: {
             id: existing.id,
@@ -264,7 +250,6 @@ export async function POST(request: Request) {
             pythonCode: existing.python_code,
             additionalGuidance: existing.additional_guidance,
             referenceUrl: existing.reference_url,
-            sasAnalysis,
             createdAt: existing.created_at,
             enhancements: [],
             reviews: [],
@@ -275,15 +260,16 @@ export async function POST(request: Request) {
       }
     }
 
-    const [pythonCode, sasAnalysis] = await Promise.all([
+    const pythonCode =
       language === "R"
-        ? convertSasToRWithContext(sasCode, { additionalGuidance, referenceUrl })
-        : convertSasToPythonWithContext(sasCode, {
+        ? await convertSasToRWithContext(sasCode, {
             additionalGuidance,
             referenceUrl,
-          }),
-      maybeAnalyzeSasCode(sasCode),
-    ]);
+          })
+        : await convertSasToPythonWithContext(sasCode, {
+            additionalGuidance,
+            referenceUrl,
+          });
     const id = randomUUID();
     await execute(
       `INSERT INTO ${table(
@@ -312,7 +298,6 @@ export async function POST(request: Request) {
         pythonCode,
         additionalGuidance,
         referenceUrl,
-        sasAnalysis,
         createdAt: new Date().toISOString(),
         enhancements: [],
         reviews: [],
@@ -322,18 +307,16 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     console.error("Conversion request failed:", error);
+    const requestError = getRequestError(error, "Conversion request failed.");
     return NextResponse.json(
       {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Conversion request failed.",
+        error: requestError.message,
         details:
           process.env.NODE_ENV === "development" && error instanceof Error
             ? error.stack
             : undefined,
       },
-      { status: 500 },
+      { status: requestError.status },
     );
   }
 }
@@ -503,18 +486,16 @@ export async function PATCH(request: Request) {
     });
   } catch (error) {
     console.error("Refinement request failed:", error);
+    const requestError = getRequestError(error, "Refinement request failed.");
     return NextResponse.json(
       {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Refinement request failed.",
+        error: requestError.message,
         details:
           process.env.NODE_ENV === "development" && error instanceof Error
             ? error.stack
             : undefined,
       },
-      { status: 500 },
+      { status: requestError.status },
     );
   }
 }

@@ -90,6 +90,14 @@ const R_COLUMN_NAME_PROMPT = [
   "After canonicalizing columns, do not reference the old SAS column name such as _racegr in dataframe operations or formulas.",
 ].join("\n");
 
+const R_TIDY_EVAL_PROMPT = [
+  "Use .data only directly inside dplyr data-mask verbs such as filter(), mutate(), transmute(), arrange(), summarize(), select(), group_by(), and case_when() inside those verbs. Never use .data[[...]] inside survey::update()/update(), svydesign(), subset(), survey::subset(), model.frame(), predict(), base eval(), or parent.frame().",
+  "For dynamic columns in helpers or purrr loops, pass column names or precomputed logical masks and use df[[name]] or design$variables[[name]].",
+  "When adding variables to a survey design with update(), use ordinary vectors from the design object, for example update(design, indicator_tmp = as.numeric(design$variables[[var]] == level)); never use update(design, indicator_tmp = as.numeric(.data[[var]] == level)).",
+  "Do not create helpers that accept unevaluated domain_expr or indicator_expr arguments and then call eval(substitute(...)); accept logical masks such as domain_mask and indicator_mask instead.",
+  "Bad R pattern: survey_mean_binary(design, domain_expr = .data[[g]] == gl, indicator_expr = copd == cl). Good R pattern: domain_mask <- design$variables[[g]] == gl; indicator_mask <- design$variables[['copd']] == cl.",
+].join("\n");
+
 const R_FACTOR_LEVEL_PROMPT = [
   "When translating SAS CLASS variables, FORMAT values, PARAM=REF, REF=, model terms, or prediction/newdata code to R factors, do not hard-code a reference level such as ref = '1' unless that exact level is guaranteed to exist after the column's type and labels are normalized.",
   "Before using relevel(), explicitly create factors with stable levels derived from the training/input data or from the SAS class/ref specification, and verify the requested reference is present in levels(f).",
@@ -112,7 +120,7 @@ const R_PREDICTIVE_MARGIN_PROMPT = [
   "When translating SAS predicted margins, PREDMARG, LSMEANS, marginal means, or repeated predict() calls in R, always align prediction vectors, standard-error vectors, and weights from the same rows.",
   "Do not call weighted.mean(as.numeric(pred), w = newdata$weight_column) unless length(pred) and length(newdata$weight_column) are explicitly known to match after missing-value handling.",
   "Before predict(), build a complete-case model/prediction dataset using the model variables and weight variable; use that same filtered dataset for newdata, prediction, and weights.",
-  "If predict(..., se.fit = TRUE) returns a list, use pred$fit for fitted values and pred$se.fit for standard errors; otherwise use the returned vector as fitted values.",
+  "Never use pred$fit or pred$se.fit unless is.list(pred) is true. Normalize prediction output with pred_fit <- if (is.list(pred) && !is.null(pred$fit)) as.numeric(pred$fit) else as.numeric(pred); pred_se <- if (is.list(pred) && !is.null(pred$se.fit)) as.numeric(pred$se.fit) else rep(NA_real_, length(pred_fit)).",
   "After prediction, create weights <- newdata$weight_column and apply the same finite/non-missing mask to pred_fit and weights before weighted.mean().",
   "Only return NA for a margin when there are no valid aligned prediction/weight rows or the quantity is genuinely not estimable; do not use NA as a shortcut when a valid SAS-equivalent estimate, SE, or CI can be computed.",
 ].join("\n");
@@ -146,6 +154,21 @@ const PYTHON_CONFIDENCE_INTERVAL_PROMPT = [
   "Runtime guards should prevent crashes but must not replace valid SE or CI calculations with zero, NaN, or placeholder values except for empty domains, singular/non-estimable terms, or missing covariance information, with a brief code comment.",
 ].join("\n");
 
+const R_SUDAAN_PROMPT = [
+  "For SAS/SUDAAN procedures, use survey-design R code, not ordinary dplyr/table/chisq.test summaries. Preserve NEST strata/PSU, WEIGHT, DESIGN=WR/MISSUNIT, SUBPOPN/domain logic, CLASS/TABLES/VAR/CATLEVEL order, labels, percent scale, and output rows.",
+  "For survey design modifications, call the S3 generic update(design, ...) after loading survey; do not call survey::update(...) because update is not exported from the survey namespace.",
+  "PROC CROSSTAB: compute NSUM as the unweighted cell/domain count; compute row/column/total percentages, SEs, CIs, and tests from the survey design. For TEST CHISQ with OUTPUT STESTVAL SDF SPVAL, use a SUDAAN-like adjusted Wald F statistic, for example survey::svychisq(..., statistic = 'adjWald'), not survey::svychisq(..., statistic = 'Chisq'). SDF is nominal table df (row levels - 1) * (column levels - 1); do not export survey::svychisq(statistic='F') denominator/parameter df as SDF.",
+  "For svychisq, create explicit factor columns in the design, for example group_tmp and outcome_tmp, and test ~group_tmp + outcome_tmp; do not rely on factor(variable) inside the formula if it causes blank output.",
+  "PROC DESCRIPT: include SUDAAN overall rows such as _ONE_=0/ROW_NAME='0' when downstream SAS cleanup expects them.",
+  "All domain masks and count guards must be NA-safe: replace missing values in logical masks with FALSE before subsetting, compute NSUM/denominators with sum(..., na.rm = TRUE), and guard empty domains with if (is.na(nsum) || nsum == 0), not if (nsum == 0).",
+  "PAIRWISE/POLY/CONTRAST: operate on the requested SUDAAN estimate scale, usually CATLEVEL PERCENT, with the design covariance matrix. Prefer survey::svyby(..., covmat=TRUE) plus survey::svycontrast(); names(coefs) must come from names(coef(est)), not invented strings such as indicator:1.",
+  "PROC DESCRIPT POLY var = 2: output separate linear and quadratic rows using the ordered CLASS level scores on SUDAAN's displayed estimate scale. Do not use arbitrary integer-rescaled coefficients because PERCENT and SEPERCENT must match SAS, not only the p-value. For six ordered AGE levels scored 1:6, linear coefficients are c(-2.5, -1.5, -0.5, 0.5, 1.5, 2.5), and quadratic coefficients are c(10/3, -2/3, -8/3, -8/3, -2/3, 10/3).",
+  "For crossed CONTRAST statements such as SEX=(...) * RACE=(...), compute PERCENT, SEPERCENT, and P_PCT for the full interaction grid. Collapse the crossed domains into one factor in SAS order, compute survey::svyby(..., covmat=TRUE), align coefficients to names(coef(est)), and use the full covariance matrix. Do not restrict contrast SEs to one-way domain_vars, and do not leave crossed contrast SEPERCENT or P_PCT blank.",
+  "Translate crossed CONTRAST coefficients literally and do not leave estimable rows blank. Do not use tryCatch(..., error=function(e) NULL) to silently export blank test or contrast values; compute a documented fallback or stop with an informative helper error.",
+  "For RLOGIST/model Wald tests, do not pass a numeric contrast matrix to survey::regTermTest(); regTermTest expects model terms/formulas. For explicit coefficient sets, coerce term names with as.character(), subset coef(model) and vcov(model), and compute the Wald chi-square manually as t(beta) %*% solve(vcov_subset) %*% beta with a chi-square p-value.",
+  "For confidence intervals, use design-based SEs and t critical values with survey df when SUDAAN Taylor WR variance is implied. If exact SUDAAN parity is unavailable, use the closest documented survey approximation with a short code comment.",
+].join("\n");
+
 const PYTHON_SUDAAN_PROMPT = [
   "When SAS code uses SUDAAN procedures or SUDAAN-style syntax, translate them as complex survey analyses, not as ordinary pandas summaries.",
   "Treat PROC DESCRIPT, PROC CROSSTAB, PROC RLOGIST, PROC REGRESS, NEST, WEIGHT, SUBPOPN, SUBGROUP, LEVELS, CLASS, TABLES, MODEL, PREDMARG, PRINT, SETENV, DESIGN=, and related SUDAAN statements as statistical method specifications that must drive the Python implementation.",
@@ -153,6 +176,7 @@ const PYTHON_SUDAAN_PROMPT = [
   "Do not use plain pandas value_counts(), crosstab(), groupby().mean(), scipy chi-square, or unweighted statsmodels models as the final SUDAAN replacement when weights, NEST, SUBPOPN, or survey design statements are present.",
   "For PROC DESCRIPT, compute weighted means/proportions/totals and design-based standard errors using Taylor-linearization-style PSU-by-stratum aggregation where possible; if a limited approximation is required, state the approximation in a code comment next to the helper.",
   "For PROC CROSSTAB, compute weighted counts, row/column percentages, standard errors, confidence limits, and tests using the survey design. Avoid ordinary unweighted chi-square tests; use a documented Rao-Scott or Wald-style survey approximation when an exact SUDAAN test is unavailable.",
+  "For PROC CROSSTAB TEST CHISQ with OUTPUT STESTVAL SDF SPVAL in Python, export a SUDAAN-like adjusted Wald F-style statistic from the crosstab/table estimate covariance, not a raw Wald chi-square and not a logistic-regression coefficient test. If a helper computes table Wald chi-square W with test rank q, set stestval = W / q, set SDF to the nominal table df (row levels - 1) * (column levels - 1), and compute p from F(q, design_df) when design df is available.",
   "For PROC CROSSTAB output columns such as wsum, weighted count, total, or weighted_frequency, compute the value from the current table cell, current row domain, or current subgroup mask as specified by the SAS output, not from the full analytic dataset.",
   "Never assign the grand total sum of weights to every crosstab row. In nested loops, build a mask such as domain_mask & row_level_mask & column_level_mask before summing weights for a cell-level wsum, and use domain_mask & row_level_mask for a row-total wsum.",
   "If a crosstab has variables such as agecat_b by glp_med12m, the wsum values should vary by age/GLP cell or by requested row/column total; their sum may equal the overall weighted total, but each row should not equal the overall weighted total.",
@@ -162,7 +186,11 @@ const PYTHON_SUDAAN_PROMPT = [
   "Never compute or report a raw Pearson chi-square statistic directly from survey-weighted population totals as a Rao-Scott or SUDAAN-like statistic; those values can be inflated by the sum of weights and produce million-scale statistics that are not comparable to SUDAAN or R survey output.",
   "For Rao-Scott-like tests in Python, base the test on weighted proportions plus design-based covariance, an effective sample size, or a documented design-effect adjustment, and report t/F/chi-square statistics on a scale comparable to standard survey software rather than on the weighted population-total scale.",
   "When generating both adjusted F and adjusted chi-square rows, align their df, p-value calculation, and notes with the same design-adjusted association approximation, similar in structure to R survey::svychisq adjusted F and Rao-Scott chi-square outputs.",
-  "For PROC RLOGIST or logistic SUDAAN models, use survey weights and cluster-aware covariance at minimum, preserving class/reference levels and predicted margins. Prefer statsmodels GLM/logit with weights plus cluster-robust covariance by PSU when no exact survey logistic implementation is available, and document the approximation.",
+  "PROC DESCRIPT PAIRWISE/POLY/CONTRAST output must preserve exact row order and row count. For the NHIS-style block with PAIRWISE SEX, AGE, _RACEGR; POLY AGE=2; and four CONTRAST statements, generate 28 rows: sex pairwise, 15 age pairwise, 6 race pairwise, AGE-LINEAR, AGE-QUAD, WHITE-HISP-CONTRAST, DIF-IN-DIF-WH-HISP-SEX-DIFFERENCES, WH-HIS-MALE, WH-HISP-FEMALE. Do not merge labels onto fewer computed rows.",
+  "PROC DESCRIPT POLY AGE=2 in Python: output both linear and quadratic rows. On SUDAAN's displayed PERCENT scale for six AGE levels scored 1:6, use linear coefficients [-2.5, -1.5, -0.5, 0.5, 1.5, 2.5] and quadratic coefficients [10/3, -2/3, -8/3, -8/3, -2/3, 10/3]. Do not use the integer-rescaled [-5, -3, -1, 1, 3, 5] or [5, -1, -4, -4, -1, 5] when exporting PERCENT/SEPERCENT.",
+  "For crossed PROC DESCRIPT CONTRAST statements such as SEX=(...) * _RACEGR=(...), compute PERCENT, SEPERCENT, and P_PCT over the full sex-by-race domain grid. If a full covariance matrix is not implemented in Python, use the same documented design-based or independent-domain covariance approximation consistently, but never export NaN/blank crossed contrast rows when the component domains are estimable.",
+  "For PROC RLOGIST or logistic SUDAAN models, use survey weights and stratified PSU Taylor sandwich covariance, preserving class/reference levels and predicted margins. A statsmodels GLM/logit fit may supply coefficients, but do not use fit.cov_params() from cov_type='cluster' as the final SUDAAN covariance for WALDCHI/SE/CI. Compute weighted score residuals by row, sum them by PSU within strata, center PSU scores within each stratum, accumulate nh/(nh-1) * centered_score'centered_score, and sandwich with the inverse weighted logistic bread X'W*mu*(1-mu)X. Use that covariance for beta SEs, odds-ratio CIs, predicted-margin delta-method SEs, and TEST WALDCHI rows.",
+  "For PROC RLOGIST TEST WALDCHI output, preserve SUDAAN's coefficient sets: OVERALL MODEL includes the intercept and all model coefficients; MODEL MINUS INTERCEPT excludes only the intercept; variable rows test the coefficient columns belonging to that CLASS/model term. Compute Wald chi-square as beta' inv(cov_beta) beta from the survey Taylor covariance, not from a non-stratified cluster covariance.",
   "For SUBPOPN or domain/subpopulation analysis, keep the full survey design in variance calculations and use a domain indicator/mask; do not simply filter the dataframe before computing variance unless the SAS/SUDAAN source explicitly does that.",
   "Use survey-design degrees of freedom derived from non-empty PSUs minus non-empty strata when the SAS/SUDAAN procedure uses design df, and use t/F critical values based on those df rather than default normal or chi-square approximations.",
   "Preserve SUDAAN percent scaling, confidence-level defaults, missing-data handling, category ordering, reference levels, and printed output column semantics as closely as possible.",
@@ -460,6 +488,357 @@ function extractJsonObject(text: string) {
   return candidate.slice(start, end + 1);
 }
 
+function normalizeGeneratedRCode(code: string) {
+  return code
+    .replace(/\bsurvey\s*::\s*update\s*\(/g, "update(")
+    .replace(
+      /svychisq\s*\(([^)]*?),\s*statistic\s*=\s*["']Chisq["']\s*\)/g,
+      'svychisq($1, statistic = "adjWald")',
+    )
+    .replace(
+      /\b(nsum|nden|n_valid|n_total|denom|denominator)\s*<-\s*sum\s*\(\s*valid\s*\)/g,
+      "$1 <- sum(valid, na.rm = TRUE)",
+    )
+    .replace(
+      /\bif\s*\(\s*!\s*any\s*\(\s*valid\s*\)\s*\)/g,
+      "if (!any(valid, na.rm = TRUE))",
+    )
+    .replace(
+      /\bif\s*\(\s*(nsum|nden|n_valid|n_total|denom|denominator)\s*==\s*0\s*\)/g,
+      "if (is.na($1) || $1 == 0)",
+    );
+}
+
+function getGeneratedRValidationIssues(code: string) {
+  const issues: string[] = [];
+  const dataPronounPattern = /(?:dplyr::|rlang::)?\.data\s*\[\[/;
+
+  if (
+    /\b(?:domain_expr|indicator_expr)\s*=\s*(?:dplyr::|rlang::)?\.data\s*\[\[/.test(
+      code,
+    )
+  ) {
+    issues.push(
+      "unsafe .data[[...]] was passed as a domain_expr/indicator_expr helper argument",
+    );
+  }
+
+  if (
+    /survey_mean_binary\s*\([\s\S]{0,600}(?:dplyr::|rlang::)?\.data\s*\[\[/.test(
+      code,
+    )
+  ) {
+    issues.push(
+      "survey_mean_binary() call uses .data[[...]] outside a dplyr data mask",
+    );
+  }
+
+  if (
+    dataPronounPattern.test(code) &&
+    /eval\s*\(\s*substitute\s*\(\s*(?:domain_expr|indicator_expr)\s*\)/.test(
+      code,
+    )
+  ) {
+    issues.push(
+      "base eval(substitute(...)) helper is combined with .data[[...]], which causes the R data-mask error",
+    );
+  }
+
+  if (/update\s*\([\s\S]{0,900}(?:dplyr::|rlang::)?\.data\s*\[\[/.test(code)) {
+    issues.push(
+      "survey update()/update() uses .data[[...]] outside a dplyr data mask; use design$variables[[name]] or d2$variables[[name]] instead",
+    );
+  }
+
+  if (
+    /(?:svydesign|model\.frame|predict|survey::subset|subset)\s*\([\s\S]{0,700}(?:dplyr::|rlang::)?\.data\s*\[\[/.test(
+      code,
+    )
+  ) {
+    issues.push(
+      ".data[[...]] is used inside a non-dplyr helper call where no data mask exists",
+    );
+  }
+
+  if (
+    /\bpred\s*\$\s*(?:fit|se\.fit)\b/.test(code) &&
+    !/is\.list\s*\(\s*pred\s*\)\s*&&\s*!\s*is\.null\s*\(\s*pred\s*\$\s*fit\s*\)/.test(
+      code,
+    )
+  ) {
+    issues.push(
+      "predict() output uses pred$fit or pred$se.fit without the required is.list(pred) and null guard",
+    );
+  }
+
+  if (
+    /age_linear\s*<-\s*contrast_from_domains\s*\([\s\S]{0,200}c\s*\(\s*-5\s*,\s*-3\s*,\s*-1\s*,\s*1\s*,\s*3\s*,\s*5\s*\)/i.test(
+      code,
+    )
+  ) {
+    issues.push(
+      "PROC DESCRIPT POLY AGE linear contrast uses integer-scaled coefficients; SUDAAN AGE 1:6 linear coefficients should be c(-2.5, -1.5, -0.5, 0.5, 1.5, 2.5)",
+    );
+  }
+
+  if (
+    /age_quad\s*<-\s*contrast_from_domains\s*\([\s\S]{0,200}c\s*\(\s*5\s*,\s*-1\s*,\s*-4\s*,\s*-4\s*,\s*-1\s*,\s*5\s*\)/i.test(
+      code,
+    )
+  ) {
+    issues.push(
+      "PROC DESCRIPT POLY AGE quadratic contrast uses integer-scaled coefficients; SUDAAN AGE 1:6 quadratic coefficients should be c(10/3, -2/3, -8/3, -8/3, -2/3, 10/3)",
+    );
+  }
+
+  if (
+    /contrast_from_domains\s*<-\s*function[\s\S]*?if\s*\(\s*length\s*\(\s*domain_vars\s*\)\s*==\s*1\s*\)[\s\S]*?svyby\s*\(/.test(
+      code,
+    ) &&
+    /contrast_from_domains\s*\([\s\S]{0,120}c\s*\(\s*["']sex["']\s*,\s*["']racegr["']\s*\)/.test(
+      code,
+    )
+  ) {
+    issues.push(
+      "crossed SUDAAN CONTRAST rows are present, but contrast_from_domains only computes covariance for one-way domains; crossed contrast SEPERCENT and P_PCT would be blank",
+    );
+  }
+
+  if (/\bsurvey\s*::\s*update\s*\(/.test(code)) {
+    issues.push(
+      "survey::update() is invalid because update is not exported from the survey namespace; use update(design, ...) instead",
+    );
+  }
+
+  if (
+    /\bif\s*\(\s*(nsum|nden|n_valid|n_total|denom|denominator)\s*==\s*0\s*\)/.test(
+      code,
+    )
+  ) {
+    issues.push(
+      "empty-domain count guard is not NA-safe; use if (is.na(nsum) || nsum == 0) and compute counts with sum(..., na.rm = TRUE)",
+    );
+  }
+
+  if (/\b(nsum|nden|n_valid|n_total|denom|denominator)\s*<-\s*sum\s*\(\s*valid\s*\)/.test(code)) {
+    issues.push(
+      "valid-row count uses sum(valid) without na.rm = TRUE; missing logical values can make nsum NA",
+    );
+  }
+
+  if (/\bif\s*\(\s*!\s*any\s*\(\s*valid\s*\)\s*\)/.test(code)) {
+    issues.push(
+      "valid-row guard uses any(valid) without na.rm = TRUE; missing logical values can make the if condition NA",
+    );
+  }
+
+  if (
+    /regTermTest\s*\(\s*[^,\n]+,\s*(?:L|contrast_matrix|contrast|matrix)\s*\)/.test(
+      code,
+    )
+  ) {
+    issues.push(
+      "survey::regTermTest() is called with a numeric contrast matrix; compute explicit Wald tests from coef(model) and vcov(model) instead",
+    );
+  }
+
+  if (
+    /stestval[\s\S]{0,800}svychisq\s*\([\s\S]{0,300}statistic\s*=\s*["']Chisq["']/.test(
+      code,
+    ) ||
+    /svychisq\s*\([\s\S]{0,300}statistic\s*=\s*["']Chisq["'][\s\S]{0,800}stestval/.test(
+      code,
+    )
+  ) {
+    issues.push(
+      "SUDAAN CROSSTAB STESTVAL should use a SUDAAN-like adjusted Wald F statistic, not svychisq(..., statistic = 'Chisq')",
+    );
+  }
+
+  return Array.from(new Set(issues));
+}
+
+function getGeneratedPythonValidationIssues(code: string) {
+  const issues: string[] = [];
+  const associationTestMatch = code.match(
+    /def\s+design_adjusted_association_test[\s\S]*?(?=\n(?:def|class|#|\w+\s*=)|$)/,
+  );
+  const associationTestCode = associationTestMatch?.[0] || "";
+
+  if (
+    /age_(?:linear_)?scores\s*=\s*np\.array\s*\(\s*\[\s*-5\s*,\s*-3\s*,\s*-1\s*,\s*1\s*,\s*3\s*,\s*5\s*\]/i.test(
+      code,
+    )
+  ) {
+    issues.push(
+      "PROC DESCRIPT POLY AGE linear contrast uses integer-scaled coefficients; use [-2.5, -1.5, -0.5, 0.5, 1.5, 2.5] for exported PERCENT/SEPERCENT",
+    );
+  }
+
+  if (
+    /age_(?:quad|quadratic)(?:_coefs|_scores)?\s*=\s*np\.array\s*\(\s*\[\s*5\s*,\s*-1\s*,\s*-4\s*,\s*-4\s*,\s*-1\s*,\s*5\s*\]/i.test(
+      code,
+    )
+  ) {
+    issues.push(
+      "PROC DESCRIPT POLY AGE quadratic contrast uses integer-scaled coefficients; use [10/3, -2/3, -8/3, -8/3, -2/3, 10/3] for exported PERCENT/SEPERCENT",
+    );
+  }
+
+  if (
+    /AGE-QUAD/.test(code) &&
+    !/(AGE-QUAD|age_quad|quadratic)[\s\S]{0,600}(10\s*\/\s*3|-8\s*\/\s*3)/i.test(
+      code,
+    )
+  ) {
+    issues.push(
+      "T1_TESTS labels include AGE-QUAD, but the Python conversion does not compute a separate SUDAAN-scale quadratic POLY row",
+    );
+  }
+
+  if (
+    /WH(?:ITE)?-?HISP|WHITE-HISP|DIF-IN-DIF-WH-HISP/i.test(code) &&
+    /COMPARE WHITE-HISPANIC[\s\S]{0,900}["']sepercent["']\s*:\s*np\.nan[\s\S]{0,200}["']p_pct["']\s*:\s*np\.nan/i.test(
+      code,
+    )
+  ) {
+    issues.push(
+      "crossed WHITE-HISPANIC contrast rows are explicitly exported with NaN SEPERCENT/P_PCT instead of computed estimates",
+    );
+  }
+
+  if (
+    /contrast_names\s*=\s*\[[\s\S]{0,1400}AGE-QUAD[\s\S]{0,600}labels\.merge\s*\(\s*ex7_2c/i.test(
+      code,
+    ) &&
+    /ex7_2c\s*=\s*approximate_descript_tests/i.test(code) &&
+    !/AGE-QUAD[\s\S]{0,900}rows\.append/i.test(code)
+  ) {
+    issues.push(
+      "T1_TESTS label merge may hide missing computed rows; compute all 28 EX7_2C rows before merging labels",
+    );
+  }
+
+  if (
+    /wald_test_from_beta[\s\S]*?["']stestval["']\s*:\s*stat\b/.test(
+      associationTestCode,
+    )
+  ) {
+    issues.push(
+      "Python CROSSTAB TEST CHISQ exports raw Wald chi-square as STESTVAL; use adjusted F-style stestval = stat / test_df and nominal SDF",
+    );
+  }
+
+  if (
+    /sm\.(?:GLM|Logit)[\s\S]*?(?:families\.Binomial|Binomial|cov_type\s*=\s*["']cluster["'])/i.test(
+      associationTestCode,
+    )
+  ) {
+    issues.push(
+      "Python CROSSTAB TEST CHISQ uses a logistic-regression Wald helper; compute the SUDAAN-like adjusted Wald statistic from the crosstab/table covariance instead",
+    );
+  }
+
+  if (
+    /["']stestval["']\s*:\s*test\s*\[\s*["']stat(?:istic)?["']\s*\]/i.test(code)
+  ) {
+    issues.push(
+      "Python CROSSTAB STESTVAL appears to export an unadjusted test statistic directly; use a SUDAAN-like adjusted Wald F-style statistic",
+    );
+  }
+
+  if (
+    /(OVERALL MODEL|MODEL MINUS INTERCEPT|OVERALL_MODEL_TESTS|waldchi)/i.test(
+      code,
+    ) &&
+    /\bcov\s*=\s*fit\.cov_params\s*\(\s*\)/.test(code) &&
+    !/model_result\.get\s*\(\s*["']cov["']/.test(code) &&
+    !/(stratified PSU Taylor|psu_scores|score_work|weighted score)/i.test(code)
+  ) {
+    issues.push(
+      "Python RLOGIST WALDCHI uses statsmodels fit.cov_params() directly; compute a stratified PSU Taylor sandwich covariance and use it for OVERALL MODEL and MODEL MINUS INTERCEPT tests",
+    );
+  }
+
+  return Array.from(new Set(issues));
+}
+
+function assertValidGeneratedRCode(code: string) {
+  const issues = getGeneratedRValidationIssues(code);
+  if (issues.length === 0) {
+    return;
+  }
+
+  throw new Error(
+    [
+      "Generated R failed validation before saving.",
+      "The model emitted code that is known to fail at runtime:",
+      ...issues.map((issue) => `- ${issue}`),
+      "Regenerate the R conversion or refine it so dynamic columns use design$variables[[name]] or precomputed logical masks instead of .data[[...]] outside dplyr verbs.",
+    ].join("\n"),
+  );
+}
+
+function assertValidGeneratedPythonCode(code: string) {
+  const issues = getGeneratedPythonValidationIssues(code);
+  if (issues.length === 0) {
+    return;
+  }
+
+  throw new Error(
+    [
+      "Generated Python failed validation before saving.",
+      "The model emitted code that is known to produce incorrect SUDAAN-like output:",
+      ...issues.map((issue) => `- ${issue}`),
+      "Regenerate the Python conversion or refine it so PROC DESCRIPT POLY/CONTRAST rows are computed on the requested PERCENT scale with nonblank SE and p-value rows.",
+    ].join("\n"),
+  );
+}
+
+function getErrorCauseCode(error: unknown) {
+  if (
+    error &&
+    typeof error === "object" &&
+    "cause" in error &&
+    error.cause &&
+    typeof error.cause === "object" &&
+    "code" in error.cause
+  ) {
+    return String(error.cause.code);
+  }
+  return "";
+}
+
+function getErrorStatus(error: unknown) {
+  if (error && typeof error === "object" && "status" in error) {
+    const status = Number(error.status);
+    if (Number.isFinite(status)) {
+      return status;
+    }
+  }
+
+  if (error instanceof Error) {
+    const match = error.message.match(/\b([1-5][0-9]{2}) status code\b/i);
+    if (match) {
+      return Number(match[1]);
+    }
+  }
+
+  return undefined;
+}
+
+function isTimeoutError(error: unknown) {
+  return (
+    error instanceof Error &&
+    (error.name === "AbortError" || error.message.toLowerCase().includes("timeout"))
+  );
+}
+
+function isTransientOpenAIError(error: unknown) {
+  const status = getErrorStatus(error);
+  return Boolean(status && status >= 500 && status < 600);
+}
+
 async function generateWithOpenAI(prompt: string, task: OpenAITask) {
   const {
     tenantId,
@@ -507,20 +886,9 @@ async function generateWithOpenAI(prompt: string, task: OpenAITask) {
     }
     return output;
   } catch (error) {
-    const code =
-      error &&
-      typeof error === "object" &&
-      "cause" in error &&
-      error.cause &&
-      typeof error.cause === "object" &&
-      "code" in error.cause
-        ? String(error.cause.code)
-        : "";
+    const code = getErrorCauseCode(error);
 
-    if (
-      error instanceof Error &&
-      (error.name === "AbortError" || error.message.toLowerCase().includes("timeout"))
-    ) {
+    if (isTimeoutError(error)) {
       throw new Error("OpenAI request timed out.");
     }
 
@@ -583,20 +951,9 @@ async function generateWithConfig(prompt: string, config: ApiConfig) {
     }
     return output;
   } catch (error) {
-    const code =
-      error &&
-      typeof error === "object" &&
-      "cause" in error &&
-      error.cause &&
-      typeof error.cause === "object" &&
-      "code" in error.cause
-        ? String(error.cause.code)
-        : "";
+    const code = getErrorCauseCode(error);
 
-    if (
-      error instanceof Error &&
-      (error.name === "AbortError" || error.message.toLowerCase().includes("timeout"))
-    ) {
+    if (isTimeoutError(error)) {
       throw new Error("OpenAI request timed out.");
     }
 
@@ -622,9 +979,14 @@ async function generateWithOpenAIFallback(prompt: string, task: OpenAITask) {
     if (
       fallbackModel &&
       error instanceof Error &&
-      error.message === "OpenAI request timed out." &&
+      (error.message === "OpenAI request timed out." ||
+        isTransientOpenAIError(error)) &&
       fallbackModel !== primaryConfig.model
     ) {
+      console.warn(
+        `Retrying ${task} with fallback Azure OpenAI model ${fallbackModel} after primary model ${primaryConfig.model} failed:`,
+        error,
+      );
       return generateWithConfig(prompt, {
         ...primaryConfig,
         model: fallbackModel,
@@ -698,7 +1060,9 @@ export async function convertSasToPythonWithContext(
     "",
     sasCode,
   ].join("\n");
-  return generateWithOpenAIFallback(prompt, "conversion");
+  const code = await generateWithOpenAIFallback(prompt, "conversion");
+  assertValidGeneratedPythonCode(code);
+  return code;
 }
 
 export async function convertSasToR(sasCode: string) {
@@ -734,6 +1098,7 @@ export async function convertSasToRWithContext(
     "Match percentile or quantile definitions as closely as possible when used.",
     "If results may differ from SAS, add brief comments explaining the most likely causes of discrepancies.",
     R_CONFIDENCE_INTERVAL_PROMPT,
+    R_SUDAAN_PROMPT,
     R_FACTOR_LEVEL_PROMPT,
     R_PREDICTIVE_MARGIN_PROMPT,
     "SAS identifiers are often case-insensitive, but R references may be case-sensitive depending on the data frame and tooling.",
@@ -741,6 +1106,7 @@ export async function convertSasToRWithContext(
     "After normalizing input columns, use lowercase variable, column, and field references consistently throughout the generated R code.",
     "When reading files into data frames, include a step such as names(df) <- tolower(names(df)) or the equivalent lowercase normalization for every relevant input dataframe.",
     R_COLUMN_NAME_PROMPT,
+    R_TIDY_EVAL_PROMPT,
     "Prefer string-safe dataframe column access patterns such as df[['seqn']] when needed.",
     "If multiple dataframes are used, make sure each relevant dataframe's columns are normalized before later lowercase references are used.",
     "If the SAS uses month variables, month names, month abbreviations, or labels such as jan through dec, treat them as ordered calendar categories rather than plain strings.",
@@ -761,7 +1127,11 @@ export async function convertSasToRWithContext(
     "",
     sasCode,
   ].join("\n");
-  return generateWithOpenAIFallback(prompt, "conversion");
+  const code = normalizeGeneratedRCode(
+    await generateWithOpenAIFallback(prompt, "conversion"),
+  );
+  assertValidGeneratedRCode(code);
+  return code;
 }
 
 export async function refineConversion(
@@ -786,6 +1156,7 @@ export async function refineConversion(
     "SAS identifiers are case-insensitive, but the updated target-language code must normalize input dataset columns to lowercase and then use lowercase references consistently.",
     "If the current code does not already normalize relevant input dataframe or dataset column names to lowercase, add that normalization step before later field references.",
     language === "R" ? R_COLUMN_NAME_PROMPT : PYTHON_COLUMN_NAME_PROMPT,
+    language === "R" ? R_TIDY_EVAL_PROMPT : "",
     language === "R"
       ? "Prefer string-safe dataframe column access such as df[['seqn']] after lowercase normalization."
       : "Prefer explicit string-based dataframe column access such as df['seqn'] instead of attribute-style access like df.seqn after lowercase normalization.",
@@ -796,7 +1167,7 @@ export async function refineConversion(
       ? "Preserve or add SAS-matching statistical logic for weighting, domain analysis, variance estimation, degrees of freedom, distribution assumptions, and 95% confidence interval calculations."
       : "Preserve or add SAS-matching statistical logic for weighting, domain analysis, variance estimation, degrees of freedom, distribution assumptions, and 95% confidence interval calculations.",
     language === "R" ? R_CONFIDENCE_INTERVAL_PROMPT : PYTHON_CONFIDENCE_INTERVAL_PROMPT,
-    language === "R" ? "" : PYTHON_SUDAAN_PROMPT,
+    language === "R" ? R_SUDAAN_PROMPT : PYTHON_SUDAAN_PROMPT,
     language === "R" ? "" : PYTHON_SUBGROUP_LABEL_PROMPT,
     language === "R" ? R_FACTOR_LEVEL_PROMPT : PYTHON_FACTOR_LEVEL_PROMPT,
     language === "R" ? R_PREDICTIVE_MARGIN_PROMPT : PYTHON_PREDICTIVE_MARGIN_PROMPT,
@@ -821,7 +1192,15 @@ export async function refineConversion(
     `Current ${target} conversion:`,
     convertedCode,
   ].join("\n");
-  return generateWithOpenAI(prompt, "conversion");
+  const generatedCode = await generateWithOpenAIFallback(prompt, "conversion");
+  const updatedCode =
+    language === "R" ? normalizeGeneratedRCode(generatedCode) : generatedCode;
+  if (language === "R") {
+    assertValidGeneratedRCode(updatedCode);
+  } else {
+    assertValidGeneratedPythonCode(updatedCode);
+  }
+  return updatedCode;
 }
 
 export async function analyzeSasCode(sasCode: string) {
@@ -878,8 +1257,9 @@ export async function discussConversion(params: {
     CROSS_LANGUAGE_NUMERIC_CONSISTENCY_PROMPT,
     "When suggesting code changes, keep dataset column names target-safe and canonicalized after input loading.",
     params.language === "R" ? R_COLUMN_NAME_PROMPT : PYTHON_COLUMN_NAME_PROMPT,
+    params.language === "R" ? R_TIDY_EVAL_PROMPT : "",
     params.language === "R" ? R_CONFIDENCE_INTERVAL_PROMPT : PYTHON_CONFIDENCE_INTERVAL_PROMPT,
-    params.language === "R" ? "" : PYTHON_SUDAAN_PROMPT,
+    params.language === "R" ? R_SUDAAN_PROMPT : PYTHON_SUDAAN_PROMPT,
     params.language === "R" ? "" : PYTHON_SUBGROUP_LABEL_PROMPT,
     params.language === "R" ? R_FACTOR_LEVEL_PROMPT : PYTHON_FACTOR_LEVEL_PROMPT,
     params.language === "R" ? R_PREDICTIVE_MARGIN_PROMPT : PYTHON_PREDICTIVE_MARGIN_PROMPT,

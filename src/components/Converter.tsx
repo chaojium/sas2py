@@ -547,6 +547,7 @@ export default function Converter() {
     try {
       const text = await file.text();
       setSasCode(text);
+      clearActiveConversion();
       setDraftSasAnalysis(null);
       setUploadedSasFileName(file.name);
       setError(null);
@@ -1011,6 +1012,41 @@ export default function Converter() {
     return Array.from({ length: lineCount }, (_, index) => index + 1);
   }, [sasCode]);
 
+  const clearActiveConversion = useCallback(() => {
+    setPythonCode("");
+    setSavedPythonCode("");
+    setCurrentEntryId(null);
+    setExecuteResult(null);
+    setExecuteError(null);
+    setExecutionInputFiles([]);
+    setConversationPrompt("");
+    setConversationError(null);
+    setShowAllConversationMessages(false);
+    setShowAllEnhancements(false);
+    setExpandedConversationMessages({});
+    setExpandedEnhancements({});
+    setIsEditingCode(false);
+    setHighlightedCodeLines([]);
+  }, []);
+
+  const handleLanguageSelect = useCallback(
+    (nextLanguage: "PYTHON" | "R") => {
+      if (nextLanguage === language) {
+        return;
+      }
+      setLanguage(nextLanguage);
+      clearActiveConversion();
+    },
+    [clearActiveConversion, language],
+  );
+
+  const selectPreferredEntry = useCallback(
+    (groupEntries: Entry[]) =>
+      groupEntries.find((entry) => entry.language === language) ||
+      groupEntries[0],
+    [language],
+  );
+
   const handleViewEntry = useCallback(async (entry: Entry) => {
     setSasCode(entry.sasCode);
     setPythonCode(entry.pythonCode);
@@ -1099,7 +1135,7 @@ export default function Converter() {
               </span>
               <button
                 type="button"
-                onClick={() => setLanguage("PYTHON")}
+                onClick={() => handleLanguageSelect("PYTHON")}
                 className={`rounded-full border px-4 py-2 text-xs uppercase tracking-[0.2em] transition ${
                   language === "PYTHON"
                     ? "border-[var(--foreground)] bg-[var(--foreground)] text-[var(--background)]"
@@ -1110,7 +1146,7 @@ export default function Converter() {
               </button>
               <button
                 type="button"
-                onClick={() => setLanguage("R")}
+                onClick={() => handleLanguageSelect("R")}
                 className={`rounded-full border px-4 py-2 text-xs uppercase tracking-[0.2em] transition ${
                   language === "R"
                     ? "border-[var(--foreground)] bg-[var(--foreground)] text-[var(--background)]"
@@ -1150,9 +1186,9 @@ export default function Converter() {
                   value={sasCode}
                   onChange={(event) => {
                     setSasCode(event.target.value);
-                    if (!currentEntryId) {
-                      setDraftSasAnalysis(null);
-                    }
+                    clearActiveConversion();
+                    setDraftSasAnalysis(null);
+                    setUploadedSasFileName(null);
                   }}
                   onScroll={(event) => {
                     if (sasLineNumberRef.current) {
@@ -1245,7 +1281,9 @@ export default function Converter() {
               <button
                 onClick={() => {
                   setSasCode("");
+                  clearActiveConversion();
                   setDraftSasAnalysis(null);
+                  setUploadedSasFileName(null);
                 }}
                 className="rounded-full border border-[var(--border)] px-4 py-2 text-sm text-[var(--muted)] transition hover:bg-white/70"
               >
@@ -1882,7 +1920,9 @@ export default function Converter() {
                   </div>
                   <button
                     className="rounded-full border border-[var(--border)] px-3 py-1 text-xs uppercase tracking-[0.2em] text-[var(--muted)]"
-                    onClick={() => void handleViewEntry(group.entries[0])}
+                    onClick={() =>
+                      void handleViewEntry(selectPreferredEntry(group.entries))
+                    }
                   >
                     View latest
                   </button>
