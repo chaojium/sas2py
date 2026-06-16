@@ -160,6 +160,7 @@ const R_SUDAAN_PROMPT = [
   "PROC CROSSTAB: compute NSUM as the unweighted cell/domain count; compute row/column/total percentages, SEs, CIs, and tests from the survey design. For TEST CHISQ with OUTPUT STESTVAL SDF SPVAL, use a SUDAAN-like adjusted Wald F statistic, for example survey::svychisq(..., statistic = 'adjWald'), not survey::svychisq(..., statistic = 'Chisq'). SDF is nominal table df (row levels - 1) * (column levels - 1); do not export survey::svychisq(statistic='F') denominator/parameter df as SDF.",
   "For svychisq, create explicit factor columns in the design, for example group_tmp and outcome_tmp, and test ~group_tmp + outcome_tmp; do not rely on factor(variable) inside the formula if it causes blank output.",
   "PROC DESCRIPT: include SUDAAN overall rows such as _ONE_=0/ROW_NAME='0' when downstream SAS cleanup expects them.",
+  "When extracting survey estimates or SEs in R, do not directly call SE(est)[['indicator_tmp']], coef(est)[['indicator_tmp']], or vcov(est)[name, name] unless the name exists. survey::SE(), coef(), and vcov() may return unnamed vectors/matrices or names such as factor-level columns. Store coef(est), SE(est), and vcov(est), check names()/rownames()/colnames(), and fall back to as.numeric(...)[1] or a documented positional extraction for one-variable estimates.",
   "All domain masks and count guards must be NA-safe: replace missing values in logical masks with FALSE before subsetting, compute NSUM/denominators with sum(..., na.rm = TRUE), and guard empty domains with if (is.na(nsum) || nsum == 0), not if (nsum == 0).",
   "PAIRWISE/POLY/CONTRAST: operate on the requested SUDAAN estimate scale, usually CATLEVEL PERCENT, with the design covariance matrix. Prefer survey::svyby(..., covmat=TRUE) plus survey::svycontrast(); names(coefs) must come from names(coef(est)), not invented strings such as indicator:1.",
   "PROC DESCRIPT POLY var = 2: output separate linear and quadratic rows using the ordered CLASS level scores on SUDAAN's displayed estimate scale. Do not use arbitrary integer-rescaled coefficients because PERCENT and SEPERCENT must match SAS, not only the p-value. For six ordered AGE levels scored 1:6, linear coefficients are c(-2.5, -1.5, -0.5, 0.5, 1.5, 2.5), and quadratic coefficients are c(10/3, -2/3, -8/3, -8/3, -2/3, 10/3).",
@@ -167,6 +168,14 @@ const R_SUDAAN_PROMPT = [
   "Translate crossed CONTRAST coefficients literally and do not leave estimable rows blank. Do not use tryCatch(..., error=function(e) NULL) to silently export blank test or contrast values; compute a documented fallback or stop with an informative helper error.",
   "For RLOGIST/model Wald tests, do not pass a numeric contrast matrix to survey::regTermTest(); regTermTest expects model terms/formulas. For explicit coefficient sets, coerce term names with as.character(), subset coef(model) and vcov(model), and compute the Wald chi-square manually as t(beta) %*% solve(vcov_subset) %*% beta with a chi-square p-value.",
   "For confidence intervals, use design-based SEs and t critical values with survey df when SUDAAN Taylor WR variance is implied. If exact SUDAAN parity is unavailable, use the closest documented survey approximation with a short code comment.",
+].join("\n");
+
+const R_SUBGROUP_LABEL_PROMPT = [
+  "For R translations of SAS/SUDAAN SUBGROUP, LEVELS, CLASS, TABLES, FORMAT, and label-driven output, preserve display labels separately from raw numeric codes.",
+  "Build an explicit format lookup for every variable that appears in SUBGROUP/TABLES output, including variables whose labels may come from PROC FORMAT, FORMAT statements, included setup files, or dataset labels. Do not only label derived variables.",
+  "When using haven::zap_labels(), first preserve value labels or recreate equivalent label maps; do not zap labels and then output raw codes as subgroup_label/row_label.",
+  "For output columns named subgroup_label, row_label, row_name, var_name, or column_label, use the format lookup for the current variable and level. Raw codes may remain in separate subgroup_level/code columns, but display-label columns should be human-readable.",
+  "For CDC/NCHS-style RSS variables, keep common labels when present or inferable: p_poverty4_r = Below 100% FPL, 100%-199% FPL, 200%-399% FPL, 400%+ FPL; nchs_metro = Metropolitan, Nonmetropolitan; dem_region = Northeast, Midwest, South, West.",
 ].join("\n");
 
 const PYTHON_SUDAAN_PROMPT = [
@@ -182,7 +191,7 @@ const PYTHON_SUDAAN_PROMPT = [
   "If a crosstab has variables such as agecat_b by glp_med12m, the wsum values should vary by age/GLP cell or by requested row/column total; their sum may equal the overall weighted total, but each row should not equal the overall weighted total.",
   "When using pandas, prefer groupby over the exact crosstab variables with observed=False/dropna=False as appropriate and aggregate the weight column with sum, rather than computing total_weight once and copying it into every output row.",
   "For SUDAAN CHISQ, LLCHISQ, WALDCHISQ, CMH, ACMH, or association tests, produce nonblank test-result rows whenever the source requests the test and the input table has estimable dimensions; include statistic, degrees of freedom or parameter text, p-value, and a note describing the approximation.",
-  "Do not output an ACMH row with blank statistic and p-value merely because exact SUDAAN ACMH is unavailable; compute the closest documented design-adjusted CMH/Rao-Scott/Wald-style association approximation, or explicitly reuse the available design-adjusted association test row with a clear note when ACMH cannot be separated.",
+  "Do not output an ACMH row with blank statistic and p-value merely because exact SUDAAN ACMH is unavailable. For ordered row/column variables, compute a distinct design-based linear-by-linear score/trend Wald test with 1 numerator df using ordered row and column scores plus PSU-by-stratum Taylor covariance. Do not reuse CHISQ/STESTVAL/Wald chi-square values for ACMH.",
   "Never compute or report a raw Pearson chi-square statistic directly from survey-weighted population totals as a Rao-Scott or SUDAAN-like statistic; those values can be inflated by the sum of weights and produce million-scale statistics that are not comparable to SUDAAN or R survey output.",
   "For Rao-Scott-like tests in Python, base the test on weighted proportions plus design-based covariance, an effective sample size, or a documented design-effect adjustment, and report t/F/chi-square statistics on a scale comparable to standard survey software rather than on the weighted population-total scale.",
   "When generating both adjusted F and adjusted chi-square rows, align their df, p-value calculation, and notes with the same design-adjusted association approximation, similar in structure to R survey::svychisq adjusted F and Rao-Scott chi-square outputs.",
@@ -655,6 +664,70 @@ function getGeneratedRValidationIssues(code: string) {
     );
   }
 
+  if (
+    /\b(?:SE|coef)\s*\(\s*[^)\n]+\s*\)\s*\[\[\s*["'][^"']+["']\s*\]\]/.test(
+      code,
+    )
+  ) {
+    issues.push(
+      "survey estimate extraction directly indexes SE(est) or coef(est) by name; store the vector, check names(), and fall back to positional extraction for one-variable estimates",
+    );
+  }
+
+  if (
+    /\bvcov\s*\(\s*[^)\n]+\s*\)\s*\[\s*["'][^"']+["']\s*,\s*["'][^"']+["']\s*\]/.test(
+      code,
+    )
+  ) {
+    issues.push(
+      "survey covariance extraction directly indexes vcov(est) by name; store the matrix, check rownames()/colnames(), and fall back safely when names differ",
+    );
+  }
+
+  if (
+    /\b(?:est_se|se_est|se_vec|se_values)\s*\[\[\s*["'][^"']+["']\s*\]\]/.test(
+      code,
+    ) &&
+    !/names\s*\(\s*(?:est_se|se_est|se_vec|se_values)\s*\)/.test(code)
+  ) {
+    issues.push(
+      "survey SE vector is indexed by name without a names() guard; this can cause subscript out of bounds when survey::SE() returns unnamed output",
+    );
+  }
+
+  if (
+    /subgroup_levels\s*<-\s*list[\s\S]*\bp_poverty4_r\b/.test(code) &&
+    !/p_poverty4_r\s*=\s*c\s*\([\s\S]{0,250}Below\s+100%\s+FPL/i.test(
+      code,
+    )
+  ) {
+    issues.push(
+      "R SUBGROUP output includes p_poverty4_r but no poverty value-label lookup; subgroup_label would show raw codes instead of FPL labels",
+    );
+  }
+
+  if (
+    /subgroup_levels\s*<-\s*list[\s\S]*\bnchs_metro\b/.test(code) &&
+    !/nchs_metro\s*=\s*c\s*\([\s\S]{0,180}Metropolitan[\s\S]{0,120}Nonmetropolitan/i.test(
+      code,
+    )
+  ) {
+    issues.push(
+      "R SUBGROUP output includes nchs_metro but no metro value-label lookup; subgroup_label would show raw codes instead of metro labels",
+    );
+  }
+
+  if (
+    /subgroup_levels\s*<-\s*list[\s\S]*\bdem_region\b/.test(code) &&
+    !/dem_region\s*=\s*c\s*\([\s\S]{0,220}Northeast[\s\S]{0,80}Midwest[\s\S]{0,80}South[\s\S]{0,80}West/i.test(
+      code,
+    )
+  ) {
+    issues.push(
+      "R SUBGROUP output includes dem_region but no region value-label lookup; subgroup_label would show raw codes instead of region labels",
+    );
+  }
+
   return Array.from(new Set(issues));
 }
 
@@ -760,6 +833,19 @@ function getGeneratedPythonValidationIssues(code: string) {
     );
   }
 
+  if (
+    /["']test["']\s*:\s*["']ACMH["'][\s\S]{0,700}["'](?:statistic|stestval)["']\s*:\s*(?:wald_chisq|adjusted_f|chisq_stat|chi_stat|stestval|p_value)\b/i.test(
+      code,
+    ) ||
+    /ACMH[\s\S]{0,500}(?:reuses?|same)\s+(?:design-adjusted\s+)?association/i.test(
+      code,
+    )
+  ) {
+    issues.push(
+      "Python ACMH output reuses the CHISQ/association statistic; compute a distinct 1-df design-based linear-by-linear score/trend Wald test",
+    );
+  }
+
   return Array.from(new Set(issues));
 }
 
@@ -790,7 +876,7 @@ function assertValidGeneratedPythonCode(code: string) {
       "Generated Python failed validation before saving.",
       "The model emitted code that is known to produce incorrect SUDAAN-like output:",
       ...issues.map((issue) => `- ${issue}`),
-      "Regenerate the Python conversion or refine it so PROC DESCRIPT POLY/CONTRAST rows are computed on the requested PERCENT scale with nonblank SE and p-value rows.",
+      "Regenerate the Python conversion or refine it so SUDAAN tests, POLY/CONTRAST rows, SEs, and p-values are computed with distinct design-based approximations instead of placeholders.",
     ].join("\n"),
   );
 }
@@ -1099,6 +1185,7 @@ export async function convertSasToRWithContext(
     "If results may differ from SAS, add brief comments explaining the most likely causes of discrepancies.",
     R_CONFIDENCE_INTERVAL_PROMPT,
     R_SUDAAN_PROMPT,
+    R_SUBGROUP_LABEL_PROMPT,
     R_FACTOR_LEVEL_PROMPT,
     R_PREDICTIVE_MARGIN_PROMPT,
     "SAS identifiers are often case-insensitive, but R references may be case-sensitive depending on the data frame and tooling.",
@@ -1168,6 +1255,7 @@ export async function refineConversion(
       : "Preserve or add SAS-matching statistical logic for weighting, domain analysis, variance estimation, degrees of freedom, distribution assumptions, and 95% confidence interval calculations.",
     language === "R" ? R_CONFIDENCE_INTERVAL_PROMPT : PYTHON_CONFIDENCE_INTERVAL_PROMPT,
     language === "R" ? R_SUDAAN_PROMPT : PYTHON_SUDAAN_PROMPT,
+    language === "R" ? R_SUBGROUP_LABEL_PROMPT : "",
     language === "R" ? "" : PYTHON_SUBGROUP_LABEL_PROMPT,
     language === "R" ? R_FACTOR_LEVEL_PROMPT : PYTHON_FACTOR_LEVEL_PROMPT,
     language === "R" ? R_PREDICTIVE_MARGIN_PROMPT : PYTHON_PREDICTIVE_MARGIN_PROMPT,
@@ -1260,6 +1348,7 @@ export async function discussConversion(params: {
     params.language === "R" ? R_TIDY_EVAL_PROMPT : "",
     params.language === "R" ? R_CONFIDENCE_INTERVAL_PROMPT : PYTHON_CONFIDENCE_INTERVAL_PROMPT,
     params.language === "R" ? R_SUDAAN_PROMPT : PYTHON_SUDAAN_PROMPT,
+    params.language === "R" ? R_SUBGROUP_LABEL_PROMPT : "",
     params.language === "R" ? "" : PYTHON_SUBGROUP_LABEL_PROMPT,
     params.language === "R" ? R_FACTOR_LEVEL_PROMPT : PYTHON_FACTOR_LEVEL_PROMPT,
     params.language === "R" ? R_PREDICTIVE_MARGIN_PROMPT : PYTHON_PREDICTIVE_MARGIN_PROMPT,
