@@ -182,6 +182,30 @@ function formatArtifactSize(sizeBytes: number) {
   return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function isImageArtifact(
+  artifact: NonNullable<ExecutionResult["artifacts"]>[number],
+) {
+  const contentType = artifact.contentType.toLowerCase();
+  const name = artifact.name.toLowerCase();
+  return (
+    contentType.startsWith("image/") ||
+    /\.(png|jpe?g|gif|webp|svg)$/.test(name)
+  );
+}
+
+function getArtifactImageSrc(
+  artifact: NonNullable<ExecutionResult["artifacts"]>[number],
+) {
+  if (!isImageArtifact(artifact)) {
+    return null;
+  }
+  if (artifact.contentBase64) {
+    const contentType = artifact.contentType || "image/png";
+    return `data:${contentType};base64,${artifact.contentBase64}`;
+  }
+  return artifact.downloadUrl || null;
+}
+
 function buildEntryGroupKey(entry: Entry) {
   return `${entry.name.trim().toLowerCase()}::${entry.sasCode.trim()}`;
 }
@@ -1007,6 +1031,23 @@ export default function Converter() {
   const visibleEnhancements = showAllEnhancements
     ? currentEntry?.enhancements || []
     : (currentEntry?.enhancements || []).slice(0, 4);
+  const imageArtifactPreviews = useMemo(
+    () =>
+      (executeResult?.artifacts || [])
+        .map((artifact) => ({
+          artifact,
+          src: getArtifactImageSrc(artifact),
+        }))
+        .filter(
+          (
+            item,
+          ): item is {
+            artifact: NonNullable<ExecutionResult["artifacts"]>[number];
+            src: string;
+          } => Boolean(item.src),
+        ),
+    [executeResult?.artifacts],
+  );
   const sasLineNumbers = useMemo(() => {
     const lineCount = Math.max(1, sasCode.split("\n").length);
     return Array.from({ length: lineCount }, (_, index) => index + 1);
@@ -1573,13 +1614,14 @@ export default function Converter() {
                       </div>
                     </div>
                   ) : null}
-                  {executeResult.images && executeResult.images.length > 0 ? (
+                  {(executeResult.images && executeResult.images.length > 0) ||
+                  imageArtifactPreviews.length > 0 ? (
                     <div>
                       <p className="mb-1 text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
                         Plots
                       </p>
                       <div className="grid gap-3 md:grid-cols-2">
-                        {executeResult.images.map((image, index) => (
+                        {(executeResult.images || []).map((image, index) => (
                           <Image
                             key={`${index}-${image.length}`}
                             src={`data:image/png;base64,${image}`}
@@ -1589,6 +1631,21 @@ export default function Converter() {
                             unoptimized
                             className="h-auto w-full rounded-xl border border-[var(--border)] bg-white p-2"
                           />
+                        ))}
+                        {imageArtifactPreviews.map(({ artifact, src }) => (
+                          <div
+                            key={`${artifact.name}-${artifact.sizeBytes}`}
+                            className="rounded-xl border border-[var(--border)] bg-white p-2"
+                          >
+                            <img
+                              src={src}
+                              alt={artifact.name}
+                              className="h-auto w-full"
+                            />
+                            <p className="mt-2 truncate text-xs text-[var(--muted)]">
+                              {artifact.name}
+                            </p>
+                          </div>
                         ))}
                       </div>
                     </div>
