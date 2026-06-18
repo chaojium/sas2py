@@ -156,6 +156,7 @@ const PYTHON_CONFIDENCE_INTERVAL_PROMPT = [
 
 const R_SUDAAN_PROMPT = [
   "For SAS/SUDAAN procedures, use survey-design R code, not ordinary dplyr/table/chisq.test summaries. Preserve NEST strata/PSU, WEIGHT, DESIGN=WR/MISSUNIT, SUBPOPN/domain logic, CLASS/TABLES/VAR/CATLEVEL order, labels, percent scale, and output rows.",
+  "Treat PROC DESCRIPT, PROC CROSSTAB, PROC RLOGIST, PROC MULTILOG, PROC REGRESS, NEST, WEIGHT, SUBPOPN, SUBGROUP, LEVELS, CLASS, TABLES, MODEL, REFLEVEL, PREDMARG, PRINT, SETENV, DESIGN=, and related SUDAAN statements as statistical method specifications that must drive the R implementation.",
   "For survey design modifications, call the S3 generic update(design, ...) after loading survey; do not call survey::update(...) because update is not exported from the survey namespace.",
   "PROC CROSSTAB: compute NSUM as the unweighted cell/domain count; compute row/column/total percentages, SEs, CIs, and tests from the survey design. For TEST CHISQ with OUTPUT STESTVAL SDF SPVAL, use a SUDAAN-like adjusted Wald F statistic, for example survey::svychisq(..., statistic = 'adjWald'), not survey::svychisq(..., statistic = 'Chisq'). SDF is nominal table df (row levels - 1) * (column levels - 1); do not export survey::svychisq(statistic='F') denominator/parameter df as SDF.",
   "For svychisq, create explicit factor columns in the design, for example group_tmp and outcome_tmp, and test ~group_tmp + outcome_tmp; do not rely on factor(variable) inside the formula if it causes blank output.",
@@ -167,6 +168,11 @@ const R_SUDAAN_PROMPT = [
   "For crossed CONTRAST statements such as SEX=(...) * RACE=(...), compute PERCENT, SEPERCENT, and P_PCT for the full interaction grid. Collapse the crossed domains into one factor in SAS order, compute survey::svyby(..., covmat=TRUE), align coefficients to names(coef(est)), and use the full covariance matrix. Do not restrict contrast SEs to one-way domain_vars, and do not leave crossed contrast SEPERCENT or P_PCT blank.",
   "Translate crossed CONTRAST coefficients literally and do not leave estimable rows blank. Do not use tryCatch(..., error=function(e) NULL) to silently export blank test or contrast values; compute a documented fallback or stop with an informative helper error.",
   "For RLOGIST/model Wald tests, do not pass a numeric contrast matrix to survey::regTermTest(); regTermTest expects model terms/formulas. For explicit coefficient sets, coerce term names with as.character(), subset coef(model) and vcov(model), and compute the Wald chi-square manually as t(beta) %*% solve(vcov_subset) %*% beta with a chi-square p-value.",
+  "PROC MULTILOG: translate as survey-weighted baseline-category multinomial logistic regression, not as ordinary nnet::multinom() with weights. The REFLEVEL statement for the response, for example REFLEVEL outcome=0, defines the denominator/reference outcome; preserve that reference outcome and preserve CLASS variable reference levels.",
+  "For PROC MULTILOG in R, prefer svyVGAM::svy_vglm() with VGAM::multinomial(refLevel=...) on a survey::svydesign object when svyVGAM/VGAM are available. Build the survey design from NEST strata/PSU and WEIGHT, apply SUBPOPN as a domain/subset on the design, and fit the multinomial model on complete model cases only while retaining survey design variance.",
+  "For PROC MULTILOG output, produce one coefficient block per non-reference outcome versus the reference outcome, including beta, SE beta, odds ratio exp(beta), and SE/CI/p-values from the survey model covariance. Variable-level and overall Wald tests must use the survey covariance across all outcome-specific coefficients belonging to that term, not separate unweighted likelihood-ratio tests.",
+  "If svyVGAM is unavailable and exact survey-weighted multinomial logistic regression cannot be implemented, emit a clearly documented approximation using separate survey::svyglm(..., family=quasibinomial()) one-vs-reference models for each non-reference outcome. Label it as an approximation near the helper and in any notes; do not claim SUDAAN-equivalent MULTILOG SEs or global tests from that fallback.",
+  "Never use nnet::multinom(), VGAM::vglm(), glm(), or unweighted model covariance as the final PROC MULTILOG replacement when NEST, WEIGHT, DESIGN=WR, or SUBPOPN are present, unless the code explicitly marks the result as a non-SUDAAN approximation and still preserves weights/subpopulation logic.",
   "For confidence intervals, use design-based SEs and t critical values with survey df when SUDAAN Taylor WR variance is implied. If exact SUDAAN parity is unavailable, use the closest documented survey approximation with a short code comment.",
 ].join("\n");
 
@@ -726,6 +732,40 @@ function getGeneratedRValidationIssues(code: string) {
   ) {
     issues.push(
       "R SUBGROUP output includes dem_region but no region value-label lookup; subgroup_label would show raw codes instead of region labels",
+    );
+  }
+
+  const hasProcMultilog = /\bPROC\s+MULTILOG\b/i.test(code);
+  const hasUndocumentedMultinom =
+    /\b(?:nnet\s*::\s*)?multinom\s*\(/i.test(code) &&
+    !/\b(?:svyVGAM|svy_vglm|survey-weighted|survey weighted|one-vs-reference|one vs reference|approximation)\b/i.test(
+      code,
+    );
+  const hasPlainVglm =
+    /\b(?:VGAM\s*::\s*)?vglm\s*\(/i.test(code) &&
+    !/\bsvy_vglm\b/i.test(code) &&
+    !/\b(?:approximation|non-SUDAAN)\b/i.test(code);
+
+  if (hasProcMultilog && hasUndocumentedMultinom) {
+    issues.push(
+      "PROC MULTILOG is translated with nnet::multinom() without documenting it as a non-SUDAAN approximation; use svyVGAM::svy_vglm() or an explicit survey::svyglm one-vs-reference fallback",
+    );
+  }
+
+  if (hasProcMultilog && hasPlainVglm) {
+    issues.push(
+      "PROC MULTILOG is translated with plain VGAM::vglm()/vglm() instead of survey-design svyVGAM::svy_vglm(); preserve NEST/WEIGHT/SUBPOPN survey variance or document a fallback approximation",
+    );
+  }
+
+  if (
+    hasProcMultilog &&
+    /\bsvy_vglm\s*\(/i.test(code) &&
+    /\bmultinomial\s*\(/i.test(code) &&
+    !/\brefLevel\s*=/i.test(code)
+  ) {
+    issues.push(
+      "PROC MULTILOG uses svy_vglm() with multinomial() but does not set refLevel from the SUDAAN REFLEVEL outcome statement",
     );
   }
 
