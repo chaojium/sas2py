@@ -16,6 +16,20 @@ export default function SignInPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
+  async function readApiError(response: Response, fallback: string) {
+    const text = await response.text();
+    if (!text.trim()) {
+      return fallback;
+    }
+
+    try {
+      const data = JSON.parse(text) as { error?: string };
+      return data.error || fallback;
+    } catch {
+      return text;
+    }
+  }
+
   useEffect(() => {
     if (status === "authenticated") {
       router.replace("/");
@@ -37,10 +51,11 @@ export default function SignInPage() {
           },
           body: JSON.stringify({ email, password }),
         });
-        const signupData = await signupResponse.json();
 
         if (!signupResponse.ok) {
-          throw new Error(signupData?.error || "Unable to create account.");
+          throw new Error(
+            await readApiError(signupResponse, "Unable to create account."),
+          );
         }
       }
 
@@ -51,7 +66,11 @@ export default function SignInPage() {
       });
 
       if (result?.error) {
-        throw new Error("Invalid email or password.");
+        throw new Error(
+          result.error === "CredentialsSignin"
+            ? "Invalid email or password."
+            : "Authentication service is unavailable. Check the database connection and try again.",
+        );
       }
 
       if (!result?.ok) {

@@ -6,6 +6,18 @@ import { getPrisma } from "@/lib/prisma";
 
 const prisma = getPrisma();
 
+function isLocalAuthBypassEnabled() {
+  return (
+    process.env.NODE_ENV !== "production" &&
+    process.env.LOCAL_AUTH_BYPASS === "true"
+  );
+}
+
+function defaultNameFromEmail(email: string) {
+  const localPart = email.split("@")[0] ?? "";
+  return localPart.replace(/[._-]+/g, " ").trim() || email;
+}
+
 export const authOptions: NextAuthOptions = {
   adapter: PrismaAdapter(prisma),
   session: {
@@ -24,6 +36,15 @@ export const authOptions: NextAuthOptions = {
 
         if (!email || !password) {
           return null;
+        }
+
+        if (isLocalAuthBypassEnabled()) {
+          return {
+            id: email,
+            email,
+            name: defaultNameFromEmail(email),
+            image: null,
+          };
         }
 
         const user = await prisma.user.findUnique({

@@ -41,3 +41,10 @@ yarn-error.log*
 next-env.d.ts
 
 /src/generated/prisma
+
+.azure-config/
+.az-version.txt
+.npm-cache/
+.codex_tmp_docx_build/
+.codex_tmp_docx_inspect/
+~$*
