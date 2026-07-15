@@ -131,6 +131,12 @@ type ConvertApiResponse = {
     sasAnalysis?: SasAnalysis;
   };
   reusedExisting?: boolean;
+  autoValidation?: {
+    passed: boolean;
+    attempts: number;
+    error?: string;
+    finalResult: ExecutionResult | null;
+  } | null;
   error?: string;
 };
 
@@ -317,6 +323,7 @@ export default function Converter() {
     [],
   );
   const [forceRegenerate, setForceRegenerate] = useState(false);
+  const [autoValidate, setAutoValidate] = useState(false);
   const sasLineNumberRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -398,17 +405,37 @@ export default function Converter() {
     setIsEditingCode(false);
     setDraftSasAnalysis(null);
     try {
-      const response = await authFetch("/api/conversions", {
-        method: "POST",
-        body: JSON.stringify({
-          sasCode,
-          name,
-          language,
-          forceRegenerate,
-          additionalGuidance,
-          referenceUrl,
-        }),
-      });
+      const response =
+        autoValidate && executionInputFiles.length > 0
+          ? await (() => {
+              const formData = new FormData();
+              formData.set("sasCode", sasCode);
+              formData.set("name", name);
+              formData.set("language", language);
+              formData.set("forceRegenerate", String(forceRegenerate));
+              formData.set("autoValidate", String(autoValidate));
+              formData.set("additionalGuidance", additionalGuidance);
+              formData.set("referenceUrl", referenceUrl);
+              for (const file of executionInputFiles) {
+                formData.append("inputFiles", file);
+              }
+              return authFetch("/api/conversions", {
+                method: "POST",
+                body: formData,
+              });
+            })()
+          : await authFetch("/api/conversions", {
+              method: "POST",
+              body: JSON.stringify({
+                sasCode,
+                name,
+                language,
+                forceRegenerate,
+                autoValidate,
+                additionalGuidance,
+                referenceUrl,
+              }),
+            });
       const { data, text } = await parseApiResponse<ConvertApiResponse>(
         response,
       );
@@ -427,7 +454,7 @@ export default function Converter() {
       setPythonCode(data.entry.pythonCode);
       setSavedPythonCode(data.entry.pythonCode);
       setHighlightedCodeLines([]);
-      setExecuteResult(null);
+      setExecuteResult(data.autoValidation?.finalResult || null);
       setExecuteError(null);
       setCurrentEntryId(data.entry.id);
       if (data.entry.sasAnalysis) {
@@ -449,7 +476,15 @@ export default function Converter() {
       setShowAllEnhancements(false);
       setExpandedConversationMessages({});
       setExpandedEnhancements({});
-      if (data.reusedExisting) {
+      if (data.autoValidation) {
+        setError(
+          data.autoValidation.error
+            ? `${data.autoValidation.error} The generated code was saved with the latest execution output below.`
+            : data.autoValidation.passed
+            ? `Automatic validation passed after ${data.autoValidation.attempts} attempt${data.autoValidation.attempts === 1 ? "" : "s"}.`
+            : `Automatic validation finished after ${data.autoValidation.attempts} attempt${data.autoValidation.attempts === 1 ? "" : "s"}, but the final run still reported an error. Review the execution output below.`,
+        );
+      } else if (data.reusedExisting) {
         setError(
           "Reused the latest saved translation for this same SAS code and language instead of generating a new one.",
         );
@@ -1257,6 +1292,57 @@ export default function Converter() {
                 </span>
               ) : null}
             </div>
+            <div className="rounded-2xl border border-[var(--border)] bg-white/70 p-4">
+              <div className="flex flex-wrap items-center gap-3">
+                <label className="cursor-pointer rounded-full border border-[var(--border)] px-4 py-2 text-sm text-[var(--muted)] transition hover:bg-white/70">
+                  Upload input file
+                  <input
+                    type="file"
+                    multiple
+                    className="hidden"
+                    onChange={handleExecutionFileUpload}
+                  />
+                </label>
+                {executionInputFiles.length > 0 ? (
+                  <>
+                    <span className="text-xs text-[var(--muted)]">
+                      {executionInputFiles.length} input file
+                      {executionInputFiles.length === 1 ? "" : "s"} attached
+                      {" "}for execution
+                    </span>
+                    <button
+                      onClick={handleClearExecutionInputFiles}
+                      className="text-xs uppercase tracking-[0.2em] text-[var(--muted)] hover:text-[var(--foreground)]"
+                    >
+                      {confirmClearExecutionFiles ? "Confirm clear" : "Clear files"}
+                    </button>
+                  </>
+                ) : null}
+              </div>
+              <p className="mt-2 text-sm text-[var(--muted)]">
+                Attach data files needed for automatic validation or manual code
+                execution. The runtime exposes them through{" "}
+                <code>SAS2PY_INPUT_DIR</code>.
+              </p>
+              {executionInputFiles.length > 0 ? (
+                <div className="mt-3 space-y-2">
+                  {executionInputFiles.map((file, index) => (
+                    <div
+                      key={`${file.name}-${file.size}-${index}`}
+                      className="flex items-center justify-between gap-3 rounded-xl border border-[var(--border)] bg-white/80 px-3 py-2 text-sm"
+                    >
+                      <span className="min-w-0 flex-1 truncate">{file.name}</span>
+                      <button
+                        onClick={() => handleRemoveExecutionInputFile(index)}
+                        className="text-xs uppercase tracking-[0.2em] text-[var(--muted)] hover:text-red-600"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
             {(currentEntry || sasCode.trim()) && (
               <div className="rounded-2xl border border-[var(--border)] bg-white/70 p-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1343,6 +1429,17 @@ export default function Converter() {
               />
               Force regenerate instead of reusing the latest saved translation
             </label>
+            <label className="flex items-start gap-2 text-sm text-[var(--muted)]">
+              <input
+                type="checkbox"
+                checked={autoValidate}
+                onChange={(event) => setAutoValidate(event.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-[var(--border)]"
+              />
+              <span>
+                Automatically run and repair generated code before saving
+              </span>
+            </label>
           </div>
             <div className="mt-8 min-w-0">
             <div className="flex items-center justify-between">
@@ -1414,30 +1511,6 @@ export default function Converter() {
               )}
             </div>
             <div className="mt-4 flex flex-wrap items-center gap-3">
-              <label className="cursor-pointer rounded-full border border-[var(--border)] px-4 py-2 text-sm text-[var(--muted)] transition hover:bg-white/70">
-                Upload input file
-                <input
-                  type="file"
-                  multiple
-                  className="hidden"
-                  onChange={handleExecutionFileUpload}
-                />
-              </label>
-              {executionInputFiles.length > 0 ? (
-                <>
-                  <span className="text-xs text-[var(--muted)]">
-                    {executionInputFiles.length} input file
-                    {executionInputFiles.length === 1 ? "" : "s"} attached
-                    {" "}for execution
-                  </span>
-                  <button
-                    onClick={handleClearExecutionInputFiles}
-                    className="text-xs uppercase tracking-[0.2em] text-[var(--muted)] hover:text-[var(--foreground)]"
-                  >
-                    {confirmClearExecutionFiles ? "Confirm clear" : "Clear files"}
-                  </button>
-                </>
-              ) : null}
               <button
                 onClick={handleExecute}
                 disabled={!pythonCode || executeLoading}
@@ -1451,35 +1524,6 @@ export default function Converter() {
                 <span className="text-sm text-red-600">{executeError}</span>
               ) : null}
             </div>
-            {executionInputFiles.length > 0 ? (
-              <div className="mt-3 rounded-2xl border border-[var(--border)] bg-white/70 p-4">
-                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
-                  Execution input files
-                </p>
-                <p className="mt-2 text-sm text-[var(--muted)]">
-                  Uploaded files are exposed to the execution runtime through
-                  the <code>SAS2PY_INPUT_DIR</code> folder. Docker runs use
-                  <code>/workspace/input</code>. Databricks runs use
-                  <code>/tmp/sas2py-input</code>.
-                </p>
-                <div className="mt-3 space-y-2">
-                  {executionInputFiles.map((file, index) => (
-                    <div
-                      key={`${file.name}-${file.size}-${index}`}
-                      className="flex items-center justify-between gap-3 rounded-xl border border-[var(--border)] bg-white/80 px-3 py-2 text-sm"
-                    >
-                      <span className="min-w-0 flex-1 truncate">{file.name}</span>
-                      <button
-                        onClick={() => handleRemoveExecutionInputFile(index)}
-                        className="text-xs uppercase tracking-[0.2em] text-[var(--muted)] hover:text-red-600"
-                      >
-                        Remove
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : null}
             {executeResult ? (
               <div className="mt-4 rounded-2xl border border-[var(--border)] bg-white/70 p-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">

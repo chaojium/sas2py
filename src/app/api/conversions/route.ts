@@ -1,9 +1,17 @@
 import { NextResponse } from "next/server";
+import {
+  runCodeInContainer,
+  type CodeExecutionResult,
+  type ExecutionInputFile,
+  type ExecutionLanguage,
+} from "@/lib/codeRunner";
 import { execute, table } from "@/lib/databricks";
 import {
   convertSasToPythonWithContext,
   convertSasToRWithContext,
   refineConversion,
+  getGeneratedConversionValidationIssues,
+  normalizeGeneratedRCode,
 } from "@/lib/codex";
 import { getAuthUser } from "@/lib/firebase/server";
 import { randomUUID } from "node:crypto";
@@ -21,6 +29,274 @@ type EnhancementRow = {
   updated_code: string;
   created_at: string;
 };
+
+type AutoValidationAttempt = {
+  attempt: number;
+  code: string;
+  result: CodeExecutionResult;
+};
+
+type AutoValidationResult = {
+  code: string;
+  attempts: AutoValidationAttempt[];
+  passed: boolean;
+  error?: string;
+};
+
+function parseAutoValidationAttempts() {
+  const parsed = Number(process.env.CONVERSION_AUTO_VALIDATE_ATTEMPTS);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 2;
+  }
+  return Math.min(Math.floor(parsed), 3);
+}
+
+function parseAutoRepairTimeoutMs() {
+  const parsed = Number(process.env.CONVERSION_AUTO_REPAIR_TIMEOUT_MS);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 90_000;
+  }
+  return Math.min(Math.floor(parsed), 180_000);
+}
+
+function executionPassed(result: CodeExecutionResult) {
+  return !result.timedOut && result.exitCode === 0 && !result.stderr.trim();
+}
+
+function buildRepairInstruction(result: CodeExecutionResult, attempt: number) {
+  return [
+    `Automatic validation attempt ${attempt} failed.`,
+    "Fix the generated code so it runs successfully while preserving the original SAS logic, statistical methods, output schema, comments, and file-input behavior.",
+    "Do not remove analytical steps just to avoid the error.",
+    "If the error is caused by missing optional input data, make the code fail with a clearer message only when execution genuinely cannot proceed.",
+    "",
+    `Exit code: ${result.exitCode ?? "unknown"}`,
+    `Timed out: ${result.timedOut ? "yes" : "no"}`,
+    "",
+    "STDOUT:",
+    result.stdout || "(no output)",
+    "",
+    "STDERR:",
+    result.stderr || "(no output)",
+  ].join("\n");
+}
+
+function buildStaticValidationRepairInstruction(issues: string[], attempt: number) {
+  return [
+    `Automatic static validation attempt ${attempt} failed before execution.`,
+    "Fix the generated code so it passes the application's known runtime-risk checks while preserving the original SAS logic, statistical methods, output schema, comments, and file-input behavior.",
+    "Do not remove analytical steps just to avoid the validation error.",
+    "",
+    "Validation issues:",
+    ...issues.map((issue) => `- ${issue}`),
+  ].join("\n");
+}
+
+async function runAutoValidation(params: {
+  sasCode: string;
+  code: string;
+  language: ExecutionLanguage;
+  additionalGuidance: string;
+  referenceUrl: string;
+  inputFiles: ExecutionInputFile[];
+}): Promise<AutoValidationResult> {
+  let currentCode = params.code;
+  const attempts: AutoValidationAttempt[] = [];
+  const maxAttempts = parseAutoValidationAttempts();
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    if (params.language === "R") {
+      currentCode = normalizeGeneratedRCode(currentCode);
+    }
+
+    const staticIssues = getGeneratedConversionValidationIssues(
+      currentCode,
+      params.language,
+    );
+    if (staticIssues.length > 0) {
+      try {
+        currentCode = await refineConversion(
+          params.sasCode,
+          currentCode,
+          buildStaticValidationRepairInstruction(staticIssues, attempt),
+          params.language,
+          {
+            additionalGuidance: params.additionalGuidance,
+            referenceUrl: params.referenceUrl,
+            timeoutMs: parseAutoRepairTimeoutMs(),
+          },
+        );
+      } catch (error) {
+        return {
+          code: currentCode,
+          attempts,
+          passed: false,
+          error:
+            error instanceof Error
+              ? `Automatic static validation repair failed: ${error.message}`
+              : "Automatic static validation repair failed.",
+        };
+      }
+
+      if (params.language === "R") {
+        currentCode = normalizeGeneratedRCode(currentCode);
+      }
+
+      if (attempt === maxAttempts) {
+        const remainingIssues = getGeneratedConversionValidationIssues(
+          currentCode,
+          params.language,
+        );
+        if (remainingIssues.length > 0) {
+          return {
+            code: currentCode,
+            attempts,
+            passed: false,
+            error: [
+              "Automatic static validation repair did not resolve all issues:",
+              ...remainingIssues.map((issue) => `- ${issue}`),
+            ].join("\n"),
+          };
+        }
+      }
+
+      continue;
+    }
+
+    const result = await runCodeInContainer(
+      currentCode,
+      params.language,
+      undefined,
+      params.inputFiles,
+    );
+    attempts.push({ attempt, code: currentCode, result });
+
+    if (executionPassed(result) || attempt === maxAttempts) {
+      return {
+        code: currentCode,
+        attempts,
+        passed: executionPassed(result),
+      };
+    }
+
+    try {
+      currentCode = await refineConversion(
+        params.sasCode,
+        currentCode,
+        buildRepairInstruction(result, attempt),
+        params.language,
+        {
+          additionalGuidance: params.additionalGuidance,
+          referenceUrl: params.referenceUrl,
+          timeoutMs: parseAutoRepairTimeoutMs(),
+        },
+      );
+    } catch (error) {
+      return {
+        code: currentCode,
+        attempts,
+        passed: false,
+        error:
+          error instanceof Error
+            ? `Automatic repair failed: ${error.message}`
+            : "Automatic repair failed.",
+      };
+    }
+  }
+
+  return {
+    code: currentCode,
+    attempts,
+    passed: false,
+  };
+}
+
+async function persistExecutionRun(params: {
+  id: string;
+  codeEntryId: string;
+  userId: string;
+  language: ExecutionLanguage;
+  result: CodeExecutionResult;
+}) {
+  await execute(
+    `INSERT INTO ${table(
+      "code_runs",
+    )} (id, code_entry_id, user_id, language, stdout, stderr, exit_code, timed_out, duration_ms, detected_packages, policy_mode, artifacts_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp())`,
+    [
+      params.id,
+      params.codeEntryId,
+      params.userId,
+      params.language,
+      params.result.stdout,
+      params.result.stderr,
+      params.result.exitCode,
+      params.result.timedOut,
+      params.result.durationMs,
+      params.result.detectedPackages.join(","),
+      params.result.policyMode,
+      JSON.stringify(params.result.artifacts || []),
+    ],
+  );
+}
+
+async function parseConversionRequest(request: Request) {
+  const contentType = request.headers.get("content-type") || "";
+  if (contentType.includes("multipart/form-data")) {
+    const formData = await request.formData();
+    const inputFiles = await Promise.all(
+      formData
+        .getAll("inputFiles")
+        .filter((value): value is File => value instanceof File && value.size > 0)
+        .map(async (file) => ({
+          name: file.name,
+          content: Buffer.from(await file.arrayBuffer()),
+        })),
+    );
+    return {
+      sasCode:
+        typeof formData.get("sasCode") === "string"
+          ? String(formData.get("sasCode")).trim()
+          : "",
+      name:
+        typeof formData.get("name") === "string"
+          ? String(formData.get("name")).trim()
+          : "",
+      rawLanguage:
+        typeof formData.get("language") === "string"
+          ? String(formData.get("language")).trim()
+          : "python",
+      forceRegenerate: formData.get("forceRegenerate") === "true",
+      autoValidate: formData.get("autoValidate") === "true",
+      additionalGuidance:
+        typeof formData.get("additionalGuidance") === "string"
+          ? String(formData.get("additionalGuidance")).trim()
+          : "",
+      referenceUrl:
+        typeof formData.get("referenceUrl") === "string"
+          ? String(formData.get("referenceUrl")).trim()
+          : "",
+      inputFiles,
+    };
+  }
+
+  const body = await request.json();
+  return {
+    sasCode: typeof body?.sasCode === "string" ? body.sasCode.trim() : "",
+    name: typeof body?.name === "string" ? body.name.trim() : "",
+    rawLanguage:
+      typeof body?.language === "string" ? body.language.trim() : "python",
+    forceRegenerate: body?.forceRegenerate === true,
+    autoValidate: body?.autoValidate === true,
+    additionalGuidance:
+      typeof body?.additionalGuidance === "string"
+        ? body.additionalGuidance.trim()
+        : "",
+    referenceUrl:
+      typeof body?.referenceUrl === "string" ? body.referenceUrl.trim() : "",
+    inputFiles: [] as ExecutionInputFile[],
+  };
+}
 
 function getRequestError(error: unknown, fallback: string) {
   const message = error instanceof Error ? error.message : fallback;
@@ -203,19 +479,17 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const body = await request.json();
-  const sasCode = typeof body?.sasCode === "string" ? body.sasCode.trim() : "";
-  const name = typeof body?.name === "string" ? body.name.trim() : "";
-  const rawLanguage =
-    typeof body?.language === "string" ? body.language.trim() : "python";
+  const {
+    sasCode,
+    name,
+    rawLanguage,
+    forceRegenerate,
+    autoValidate,
+    additionalGuidance,
+    referenceUrl,
+    inputFiles,
+  } = await parseConversionRequest(request);
   const language = rawLanguage.toLowerCase() === "r" ? "R" : "PYTHON";
-  const forceRegenerate = body?.forceRegenerate === true;
-  const additionalGuidance =
-    typeof body?.additionalGuidance === "string"
-      ? body.additionalGuidance.trim()
-      : "";
-  const referenceUrl =
-    typeof body?.referenceUrl === "string" ? body.referenceUrl.trim() : "";
   if (!sasCode) {
     return NextResponse.json(
       { error: "SAS code is required." },
@@ -227,7 +501,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    if (!forceRegenerate) {
+    if (!forceRegenerate && !autoValidate) {
       const existingRows = await execute<Record<string, unknown>>(
         `SELECT id, user_id, name, language, sas_code, python_code, created_at, additional_guidance, reference_url
          FROM ${table("code_entries")}
@@ -260,16 +534,31 @@ export async function POST(request: Request) {
       }
     }
 
-    const pythonCode =
+    let pythonCode =
       language === "R"
         ? await convertSasToRWithContext(sasCode, {
             additionalGuidance,
             referenceUrl,
+            skipValidation: autoValidate,
           })
         : await convertSasToPythonWithContext(sasCode, {
             additionalGuidance,
             referenceUrl,
+            skipValidation: autoValidate,
           });
+    const autoValidation = autoValidate
+      ? await runAutoValidation({
+          sasCode,
+          code: pythonCode,
+          language,
+          additionalGuidance,
+          referenceUrl,
+          inputFiles,
+        })
+      : null;
+    if (autoValidation) {
+      pythonCode = autoValidation.code;
+    }
     const id = randomUUID();
     await execute(
       `INSERT INTO ${table(
@@ -287,6 +576,17 @@ export async function POST(request: Request) {
         referenceUrl,
       ],
     );
+    if (autoValidation) {
+      for (const attempt of autoValidation.attempts) {
+        await persistExecutionRun({
+          id: `auto-${id}-${attempt.attempt}`,
+          codeEntryId: id,
+          userId: user.appUserId,
+          language,
+          result: attempt.result,
+        });
+      }
+    }
 
     return NextResponse.json({
       entry: {
@@ -301,9 +601,33 @@ export async function POST(request: Request) {
         createdAt: new Date().toISOString(),
         enhancements: [],
         reviews: [],
-        runs: [],
+        runs: autoValidation
+          ? autoValidation.attempts.map((attempt) => ({
+              id: `auto-${id}-${attempt.attempt}`,
+              language,
+              stdout: attempt.result.stdout,
+              stderr: attempt.result.stderr,
+              exitCode: attempt.result.exitCode,
+              timedOut: attempt.result.timedOut,
+              durationMs: attempt.result.durationMs,
+              detectedPackages: attempt.result.detectedPackages,
+              policyMode: attempt.result.policyMode,
+              artifacts: attempt.result.artifacts || [],
+              createdAt: new Date().toISOString(),
+            }))
+          : [],
       },
       reusedExisting: false,
+      autoValidation: autoValidation
+        ? {
+            passed: autoValidation.passed,
+            attempts: autoValidation.attempts.length,
+            error: autoValidation.error,
+            finalResult:
+              autoValidation.attempts[autoValidation.attempts.length - 1]
+                ?.result || null,
+          }
+        : null,
     });
   } catch (error) {
     console.error("Conversion request failed:", error);

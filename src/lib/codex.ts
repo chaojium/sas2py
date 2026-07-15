@@ -46,6 +46,8 @@ export type ConversationMessageInput = {
 type ConversionContext = {
   additionalGuidance?: string;
   referenceUrl?: string;
+  timeoutMs?: number;
+  skipValidation?: boolean;
 };
 
 const PYTHON_FILE_PATH_PROMPT = [
@@ -93,6 +95,7 @@ const R_COLUMN_NAME_PROMPT = [
 const R_TIDY_EVAL_PROMPT = [
   "Use .data only directly inside dplyr data-mask verbs such as filter(), mutate(), transmute(), arrange(), summarize(), select(), group_by(), and case_when() inside those verbs. Never use .data[[...]] inside survey::update()/update(), svydesign(), subset(), survey::subset(), model.frame(), predict(), base eval(), or parent.frame().",
   "For dynamic columns in helpers or purrr loops, pass column names or precomputed logical masks and use df[[name]] or design$variables[[name]].",
+  "Inside mutate(), do not call scalar helper functions with whole columns when the helper uses switch(), if/else, or expects one value. For row labels such as level_label = label_value(variable, level), vectorize explicitly with mapply(label_value, variable, level, USE.NAMES = FALSE) or rowwise() plus ungroup().",
   "When adding variables to a survey design with update(), use ordinary vectors from the design object, for example update(design, indicator_tmp = as.numeric(design$variables[[var]] == level)); never use update(design, indicator_tmp = as.numeric(.data[[var]] == level)).",
   "Do not create helpers that accept unevaluated domain_expr or indicator_expr arguments and then call eval(substitute(...)); accept logical masks such as domain_mask and indicator_mask instead.",
   "Bad R pattern: survey_mean_binary(design, domain_expr = .data[[g]] == gl, indicator_expr = copd == cl). Good R pattern: domain_mask <- design$variables[[g]] == gl; indicator_mask <- design$variables[['copd']] == cl.",
@@ -504,9 +507,13 @@ function extractJsonObject(text: string) {
   return candidate.slice(start, end + 1);
 }
 
-function normalizeGeneratedRCode(code: string) {
+export function normalizeGeneratedRCode(code: string) {
   return code
     .replace(/\bsurvey\s*::\s*update\s*\(/g, "update(")
+    .replace(
+      /\blevel_label\s*=\s*label_value\s*\(\s*variable\s*,\s*((?:dplyr::|rlang::)?\.data\s*\[\[\s*["']level["']\s*\]\])\s*\)/g,
+      "level_label = mapply(label_value, variable, $1, USE.NAMES = FALSE)",
+    )
     .replace(
       /svychisq\s*\(([^)]*?),\s*statistic\s*=\s*["']Chisq["']\s*\)/g,
       'svychisq($1, statistic = "adjWald")',
@@ -528,6 +535,16 @@ function normalizeGeneratedRCode(code: string) {
 function getGeneratedRValidationIssues(code: string) {
   const issues: string[] = [];
   const dataPronounPattern = /(?:dplyr::|rlang::)?\.data\s*\[\[/;
+
+  if (
+    /\blevel_label\s*=\s*label_value\s*\(\s*variable\s*,\s*(?:dplyr::|rlang::)?\.data\s*\[\[\s*["']level["']\s*\]\]\s*\)/.test(
+      code,
+    )
+  ) {
+    issues.push(
+      "level_label uses label_value(variable, .data[['level']]) inside mutate; vectorize with mapply(label_value, variable, level, USE.NAMES = FALSE)",
+    );
+  }
 
   if (
     /\b(?:domain_expr|indicator_expr)\s*=\s*(?:dplyr::|rlang::)?\.data\s*\[\[/.test(
@@ -922,6 +939,15 @@ function assertValidGeneratedPythonCode(code: string) {
   );
 }
 
+export function getGeneratedConversionValidationIssues(
+  code: string,
+  language: "PYTHON" | "R",
+) {
+  return language === "R"
+    ? getGeneratedRValidationIssues(code)
+    : getGeneratedPythonValidationIssues(code);
+}
+
 function getErrorCauseCode(error: unknown) {
   if (
     error &&
@@ -963,7 +989,23 @@ function isTimeoutError(error: unknown) {
 
 function isTransientOpenAIError(error: unknown) {
   const status = getErrorStatus(error);
-  return Boolean(status && status >= 500 && status < 600);
+  if (status && status >= 500 && status < 600) {
+    return true;
+  }
+
+  if (error instanceof Error) {
+    const message = error.message.toLowerCase();
+    return (
+      message.includes("connection error") ||
+      message.includes("network") ||
+      message.includes("socket") ||
+      message.includes("econnreset") ||
+      message.includes("etimedout")
+    );
+  }
+
+  const code = getErrorCauseCode(error).toLowerCase();
+  return code === "econnreset" || code === "etimedout" || code === "econnrefused";
 }
 
 async function generateWithOpenAI(prompt: string, task: OpenAITask) {
@@ -1096,12 +1138,19 @@ async function generateWithConfig(prompt: string, config: ApiConfig) {
   }
 }
 
-async function generateWithOpenAIFallback(prompt: string, task: OpenAITask) {
+async function generateWithOpenAIFallback(
+  prompt: string,
+  task: OpenAITask,
+  timeoutMs?: number,
+) {
   const primaryConfig = getApiConfig(task);
   const fallbackModel = resolveFallbackModelForTask(task);
+  const config = timeoutMs
+    ? { ...primaryConfig, timeoutMs }
+    : primaryConfig;
 
   try {
-    return await generateWithConfig(prompt, primaryConfig);
+    return await generateWithConfig(prompt, config);
   } catch (error) {
     if (
       fallbackModel &&
@@ -1111,11 +1160,11 @@ async function generateWithOpenAIFallback(prompt: string, task: OpenAITask) {
       fallbackModel !== primaryConfig.model
     ) {
       console.warn(
-        `Retrying ${task} with fallback Azure OpenAI model ${fallbackModel} after primary model ${primaryConfig.model} failed:`,
+        `Retrying ${task} with fallback Azure OpenAI model ${fallbackModel} after primary model ${config.model} failed:`,
         error,
       );
       return generateWithConfig(prompt, {
-        ...primaryConfig,
+        ...config,
         model: fallbackModel,
       });
     }
@@ -1188,7 +1237,9 @@ export async function convertSasToPythonWithContext(
     sasCode,
   ].join("\n");
   const code = await generateWithOpenAIFallback(prompt, "conversion");
-  assertValidGeneratedPythonCode(code);
+  if (!context.skipValidation) {
+    assertValidGeneratedPythonCode(code);
+  }
   return code;
 }
 
@@ -1258,7 +1309,9 @@ export async function convertSasToRWithContext(
   const code = normalizeGeneratedRCode(
     await generateWithOpenAIFallback(prompt, "conversion"),
   );
-  assertValidGeneratedRCode(code);
+  if (!context.skipValidation) {
+    assertValidGeneratedRCode(code);
+  }
   return code;
 }
 
@@ -1321,7 +1374,11 @@ export async function refineConversion(
     `Current ${target} conversion:`,
     convertedCode,
   ].join("\n");
-  const generatedCode = await generateWithOpenAIFallback(prompt, "conversion");
+  const generatedCode = await generateWithOpenAIFallback(
+    prompt,
+    "conversion",
+    context.timeoutMs,
+  );
   const updatedCode =
     language === "R" ? normalizeGeneratedRCode(generatedCode) : generatedCode;
   if (language === "R") {
