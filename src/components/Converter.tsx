@@ -169,6 +169,12 @@ type ConvertApiResponse = {
   error?: string;
 };
 
+type ExecutionResultOrigin =
+  | "automatic-passed"
+  | "automatic-failed"
+  | "manual"
+  | "saved";
+
 async function parseApiResponse<T>(
   response: Response,
 ): Promise<{ data: T | null; text: string }> {
@@ -245,9 +251,12 @@ function buildEntryGroupKey(entry: Entry) {
   return `${entry.name.trim().toLowerCase()}::${entry.sasCode.trim()}`;
 }
 
+function getSasSourceKey(value: string) {
+  return value.replace(/\r\n/g, "\n").trim();
+}
+
 function isSameSasSource(left: string, right: string) {
-  const normalize = (value: string) => value.replace(/\r\n/g, "\n").trim();
-  return normalize(left) === normalize(right);
+  return getSasSourceKey(left) === getSasSourceKey(right);
 }
 
 function getChangedLineNumbers(previousCode: string, nextCode: string) {
@@ -323,7 +332,10 @@ export default function Converter() {
   const [executeResult, setExecuteResult] = useState<ExecutionResult | null>(
     null,
   );
+  const [executeResultOrigin, setExecuteResultOrigin] =
+    useState<ExecutionResultOrigin | null>(null);
   const [executionInputFiles, setExecutionInputFiles] = useState<File[]>([]);
+  const inputFilesBySasSourceRef = useRef<Map<string, File[]>>(new Map());
   const [confirmClearExecutionFiles, setConfirmClearExecutionFiles] =
     useState(false);
   const [sasAnalysisByEntry, setSasAnalysisByEntry] = useState<
@@ -437,6 +449,7 @@ export default function Converter() {
     setError(null);
     setExecuteError(null);
     setExecuteResult(null);
+    setExecuteResultOrigin(null);
     setPythonCode("");
     setSavedPythonCode("");
     setCurrentEntryId(null);
@@ -492,7 +505,15 @@ export default function Converter() {
       setPythonCode(data.entry.pythonCode);
       setSavedPythonCode(data.entry.pythonCode);
       setHighlightedCodeLines([]);
-      setExecuteResult(data.autoValidation?.finalResult || null);
+      const automaticResult = data.autoValidation?.finalResult || null;
+      setExecuteResult(automaticResult);
+      setExecuteResultOrigin(
+        automaticResult
+          ? data.autoValidation?.passed
+            ? "automatic-passed"
+            : "automatic-failed"
+          : null,
+      );
       setExecuteError(null);
       setCurrentEntryId(data.entry.id);
       const sasAnalysis = data.entry.sasAnalysis || analysisToPreserve;
@@ -608,6 +629,9 @@ export default function Converter() {
       setPythonCode(data.entry.pythonCode);
       setSavedPythonCode(data.entry.pythonCode);
       setIsEditingCode(false);
+      setExecuteResult(null);
+      setExecuteResultOrigin(null);
+      setExecuteError(null);
       if (data.entry.enhancements) {
         setEntries((prev) =>
           prev.map((entry) =>
@@ -643,11 +667,18 @@ export default function Converter() {
 
     try {
       const text = await file.text();
+      const keepCurrentInputFiles = isSameSasSource(text, sasCode);
+      const rememberedInputFiles =
+        inputFilesBySasSourceRef.current.get(getSasSourceKey(text)) || [];
       setSasCode(text);
       clearActiveConversion();
       setDraftSasAnalysis(null);
       setUploadedSasFileName(file.name);
       setError(null);
+      if (!keepCurrentInputFiles) {
+        setExecutionInputFiles(rememberedInputFiles);
+        setConfirmClearExecutionFiles(false);
+      }
       if (!name.trim()) {
         const baseName = file.name.replace(/\.sas$/i, "");
         setName(baseName);
@@ -684,6 +715,9 @@ export default function Converter() {
       setPythonCode(data.entry.pythonCode);
       setSavedPythonCode(data.entry.pythonCode);
       setIsEditingCode(false);
+      setExecuteResult(null);
+      setExecuteResultOrigin(null);
+      setExecuteError(null);
       await fetchEntries();
     } catch (err) {
       setError(
@@ -765,6 +799,7 @@ export default function Converter() {
     setExecuteLoading(true);
     setExecuteError(null);
     setExecuteResult(null);
+    setExecuteResultOrigin(null);
     try {
       const response = executionInputFiles.length > 0
         ? await (() => {
@@ -830,8 +865,11 @@ export default function Converter() {
           throw new Error("Execution is still running. Please try again shortly.");
         }
         setExecuteResult(pollResult);
+        setExecuteResultOrigin("manual");
       } else {
-        setExecuteResult(data.result || null);
+        const result = data.result || null;
+        setExecuteResult(result);
+        setExecuteResultOrigin(result ? "manual" : null);
       }
       await fetchEntries();
     } catch (err) {
@@ -902,16 +940,32 @@ export default function Converter() {
       event.target.value = "";
       return;
     }
-    setExecutionInputFiles((prev) => [...prev, ...files]);
+    setExecutionInputFiles((prev) => {
+      const nextFiles = [...prev, ...files];
+      const sourceKey = getSasSourceKey(sasCode);
+      if (sourceKey) {
+        inputFilesBySasSourceRef.current.set(sourceKey, nextFiles);
+      }
+      return nextFiles;
+    });
     setExecuteError(null);
     setConfirmClearExecutionFiles(false);
     event.target.value = "";
   };
 
   const handleRemoveExecutionInputFile = (targetIndex: number) => {
-    setExecutionInputFiles((prev) =>
-      prev.filter((_, index) => index !== targetIndex),
-    );
+    setExecutionInputFiles((prev) => {
+      const nextFiles = prev.filter((_, index) => index !== targetIndex);
+      const sourceKey = getSasSourceKey(sasCode);
+      if (sourceKey) {
+        if (nextFiles.length > 0) {
+          inputFilesBySasSourceRef.current.set(sourceKey, nextFiles);
+        } else {
+          inputFilesBySasSourceRef.current.delete(sourceKey);
+        }
+      }
+      return nextFiles;
+    });
     setConfirmClearExecutionFiles(false);
   };
 
@@ -920,6 +974,7 @@ export default function Converter() {
       setConfirmClearExecutionFiles(true);
       return;
     }
+    inputFilesBySasSourceRef.current.delete(getSasSourceKey(sasCode));
     setExecutionInputFiles([]);
     setConfirmClearExecutionFiles(false);
   };
@@ -1026,6 +1081,9 @@ export default function Converter() {
       setPythonCode(data.entry.pythonCode);
       setSavedPythonCode(data.entry.pythonCode);
       setIsEditingCode(false);
+      setExecuteResult(null);
+      setExecuteResultOrigin(null);
+      setExecuteError(null);
       if (data.entry.enhancements) {
         setEntries((prev) =>
           prev.map((entry) =>
@@ -1126,17 +1184,15 @@ export default function Converter() {
     return Array.from({ length: lineCount }, (_, index) => index + 1);
   }, [sasCode]);
 
-  const clearActiveConversion = useCallback(
-    (options: { clearInputFiles?: boolean } = {}) => {
+  const clearActiveConversion = useCallback(() => {
     setError(null);
     setPythonCode("");
     setSavedPythonCode("");
     setCurrentEntryId(null);
     setExecuteResult(null);
+    setExecuteResultOrigin(null);
     setExecuteError(null);
-      if (options.clearInputFiles !== false) {
-        setExecutionInputFiles([]);
-      }
+    setConfirmClearExecutionFiles(false);
     setConversationPrompt("");
     setConversationError(null);
     setShowAllConversationMessages(false);
@@ -1145,9 +1201,7 @@ export default function Converter() {
     setExpandedEnhancements({});
     setIsEditingCode(false);
     setHighlightedCodeLines([]);
-    },
-    [],
-  );
+  }, []);
 
   const handleLanguageSelect = useCallback(
     (nextLanguage: "PYTHON" | "R") => {
@@ -1158,7 +1212,7 @@ export default function Converter() {
         setDraftSasAnalysis(sasAnalysisByEntry[currentEntryId] || null);
       }
       setLanguage(nextLanguage);
-      clearActiveConversion({ clearInputFiles: false });
+      clearActiveConversion();
     },
     [clearActiveConversion, currentEntryId, language, sasAnalysisByEntry],
   );
@@ -1173,15 +1227,19 @@ export default function Converter() {
   const handleViewEntry = useCallback(
     async (entry: Entry) => {
       const keepCurrentInputFiles = isSameSasSource(entry.sasCode, sasCode);
+      const rememberedInputFiles =
+        inputFilesBySasSourceRef.current.get(getSasSourceKey(entry.sasCode)) || [];
       setSasCode(entry.sasCode);
       setPythonCode(entry.pythonCode);
       setSavedPythonCode(entry.pythonCode);
       setExecuteResult(
         entry.runs.length > 0 ? runToExecutionResult(entry.runs[0]) : null,
       );
+      setExecuteResultOrigin(entry.runs.length > 0 ? "saved" : null);
       setExecuteError(null);
       if (!keepCurrentInputFiles) {
-        setExecutionInputFiles([]);
+        setExecutionInputFiles(rememberedInputFiles);
+        setConfirmClearExecutionFiles(false);
         setUploadedSasFileName(null);
       }
       setCurrentEntryId(entry.id);
@@ -1353,7 +1411,15 @@ export default function Converter() {
                   placeholder="Paste SAS code here..."
                   value={sasCode}
                   onChange={(event) => {
-                    setSasCode(event.target.value);
+                    const nextSasCode = event.target.value;
+                    const nextSourceKey = getSasSourceKey(nextSasCode);
+                    if (nextSourceKey && executionInputFiles.length > 0) {
+                      inputFilesBySasSourceRef.current.set(
+                        nextSourceKey,
+                        executionInputFiles,
+                      );
+                    }
+                    setSasCode(nextSasCode);
                     clearActiveConversion();
                     setDraftSasAnalysis(null);
                     setUploadedSasFileName(null);
@@ -1502,31 +1568,6 @@ export default function Converter() {
                 )}
               </div>
             )}
-            <div className="flex flex-wrap items-center gap-3">
-              <button
-                onClick={handleConvert}
-                disabled={!canConvert}
-                className="rounded-full bg-[var(--primary)] px-6 py-2.5 text-sm font-semibold text-white transition hover:translate-y-[-1px] disabled:cursor-not-allowed disabled:opacity-50"
-              >
-              {loading ? "Running GPT-5.5..." : "Convert"}
-            </button>
-              <button
-                onClick={() => {
-                  setSasCode("");
-                  clearActiveConversion();
-                  setDraftSasAnalysis(null);
-                  setUploadedSasFileName(null);
-                }}
-                className="rounded-full border border-[var(--border)] px-4 py-2 text-sm text-[var(--muted)] transition hover:bg-white/70"
-              >
-                Clear
-              </button>
-              {error ? (
-                <span className="whitespace-pre-line text-sm text-red-600">
-                  {error}
-                </span>
-              ) : null}
-            </div>
             <label className="flex items-center gap-2 text-sm text-[var(--muted)]">
               <input
                 type="checkbox"
@@ -1554,8 +1595,36 @@ export default function Converter() {
                 ) : null}
               </span>
             </label>
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                onClick={handleConvert}
+                disabled={!canConvert}
+                className="rounded-full bg-[var(--primary)] px-6 py-2.5 text-sm font-semibold text-white transition hover:translate-y-[-1px] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {loading ? "Running GPT-5.5..." : "Convert"}
+              </button>
+              <button
+                onClick={() => {
+                  setSasCode("");
+                  clearActiveConversion();
+                  inputFilesBySasSourceRef.current.clear();
+                  setExecutionInputFiles([]);
+                  setConfirmClearExecutionFiles(false);
+                  setDraftSasAnalysis(null);
+                  setUploadedSasFileName(null);
+                }}
+                className="rounded-full border border-[var(--border)] px-4 py-2 text-sm text-[var(--muted)] transition hover:bg-white/70"
+              >
+                Clear
+              </button>
+              {error ? (
+                <span className="whitespace-pre-line text-sm text-red-600">
+                  {error}
+                </span>
+              ) : null}
+            </div>
           </div>
-            <div className="mt-8 min-w-0">
+          <div className="mt-8 min-w-0">
             <div className="flex items-center justify-between">
               <h3 className="text-lg font-semibold">
                 {language === "R" ? "R output" : "Python output"}
@@ -1608,7 +1677,12 @@ export default function Converter() {
                 <textarea
                   className="min-h-[320px] w-full rounded-2xl border border-[var(--border)] bg-white/80 p-4 font-mono text-sm shadow-inner focus:outline-none focus:ring-2 focus:ring-[var(--secondary)]"
                   value={pythonCode}
-                  onChange={(event) => setPythonCode(event.target.value)}
+                  onChange={(event) => {
+                    setPythonCode(event.target.value);
+                    setExecuteResult(null);
+                    setExecuteResultOrigin(null);
+                    setExecuteError(null);
+                  }}
                   spellCheck={false}
                 />
               ) : (
@@ -1628,11 +1702,17 @@ export default function Converter() {
               <button
                 onClick={handleExecute}
                 disabled={!pythonCode || executeLoading}
-                className="rounded-full bg-[var(--secondary)] px-5 py-2 text-sm font-semibold text-white transition hover:translate-y-[-1px] disabled:cursor-not-allowed disabled:opacity-50"
+                className={`rounded-full px-5 py-2 text-sm font-semibold transition hover:translate-y-[-1px] disabled:cursor-not-allowed disabled:opacity-50 ${
+                  executeResult
+                    ? "border border-[var(--border)] text-[var(--foreground)] hover:bg-white/70"
+                    : "bg-[var(--secondary)] text-white"
+                }`}
               >
                 {executeLoading
                   ? `Running ${language === "R" ? "R" : "Python"}...`
-                  : `Run ${language === "R" ? "R" : "Python"} code`}
+                  : executeResult
+                    ? "Run again"
+                    : `Run ${language === "R" ? "R" : "Python"} code`}
               </button>
               {executeError ? (
                 <span className="whitespace-pre-line text-sm text-red-600">
@@ -1642,6 +1722,16 @@ export default function Converter() {
             </div>
             {executeResult ? (
               <div className="mt-4 rounded-2xl border border-[var(--border)] bg-white/70 p-4">
+                {executeResultOrigin === "automatic-passed" ? (
+                  <p className="mb-3 text-sm font-medium text-emerald-700">
+                    Automatically run and validated
+                  </p>
+                ) : null}
+                {executeResultOrigin === "automatic-failed" ? (
+                  <p className="mb-3 text-sm font-medium text-amber-700">
+                    Automatic run completed with errors
+                  </p>
+                ) : null}
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <h4 className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
                     Execution output
