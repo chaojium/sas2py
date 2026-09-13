@@ -24,6 +24,7 @@
 - [x] Support conversion name.
 - [x] Support Python and R target languages.
 - [x] Support additional guidance and reference URL.
+- [x] Add user-facing source type selector for Auto-detect / Not sure, SAS, SAS with SUDAAN, and Mixed SAS + SUDAAN.
 - [x] Support conversion reuse and force regeneration.
 - [x] Display generated code.
 - [x] Support code download.
@@ -35,6 +36,11 @@
 - [x] Implement SAS-to-Python conversion.
 - [x] Implement SAS-to-R conversion.
 - [x] Add prompt guardrails for comments, paths, statistical logic, survey design, SUDAAN, factor levels, predictive margins, and confidence intervals.
+- [x] Add deterministic router/extractor for Base SAS, SAS survey, SUDAAN, and mixed sources.
+- [x] Add backend support for user-selected source type overrides.
+- [x] Add route-specific prompt fragments from extracted source structure.
+- [x] Add route-aware generated-code reviewer for missing survey design, missing weights, subpopulation hints, and unsafe paths.
+- [x] Return conversion pipeline reports for newly generated conversions.
 - [x] Add generated Python validation.
 - [x] Add generated R validation.
 - [x] Add fallback model behavior for transient failures.
@@ -68,7 +74,7 @@
 - [x] Support Python execution.
 - [x] Support R execution.
 - [x] Add Databricks Jobs backend.
-- [x] Add Docker backend.
+- [x] Remove Docker backend.
 - [x] Add asynchronous Databricks polling with signed execution token.
 - [x] Capture stdout, stderr, exit code, timeout, duration, packages, policy mode, images, and artifacts.
 - [x] Persist execution results.
@@ -99,7 +105,13 @@
 
 - [ ] Add automated tests for core API routes.
 - [ ] Add regression tests using examples in the `examples` folder.
+- [ ] Add unit tests for the router/extractor against Base SAS, SAS survey, SUDAAN, mixed, comments-only false positives, and macro-heavy cases.
 - [ ] Add a small prompt-regression harness for known SAS/SUDAAN cases.
+- [ ] Persist route decisions and validation findings in Databricks instead of returning them only in the conversion response.
+- [ ] Add UI display for detected route, confidence, signals, and validation findings.
+- [x] Add a user override for route selection when the classifier is uncertain.
+- [ ] Expand procedure-level extraction for PROC FORMAT, PROC SQL, DATA steps, PROC DESCRIPT, PROC CROSSTAB, PROC RLOGIST, and PROC MULTILOG.
+- [ ] Add optional execution-and-repair loop after route-aware validation.
 - [ ] Add a deployment checklist for Azure Web App + Databricks + Blob Storage.
 - [ ] Add admin documentation for Databricks table creation and migrations.
 - [ ] Add role-based project sharing if multiple users need to collaborate on the same conversion.

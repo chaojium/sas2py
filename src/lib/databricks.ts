@@ -41,7 +41,7 @@ function normalizeDatabricksError(error: unknown, context: string) {
 
   if (statusCode === 403) {
     return new Error(
-      `${context}: Databricks rejected the request with 403 Forbidden. Check DATABRICKS_ACCESS_TOKEN, DATABRICKS_HTTP_PATH, warehouse permissions, and that the same environment variables are configured in Vercel.`,
+      `${context}: Databricks rejected the request with 403 Forbidden. Check DATABRICKS_ACCESS_TOKEN, DATABRICKS_HTTP_PATH, warehouse permissions, and that the same environment variables are configured in the app runtime environment.`,
       { cause: error },
     );
   }

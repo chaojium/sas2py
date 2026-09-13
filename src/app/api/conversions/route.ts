@@ -1,18 +1,24 @@
 import { NextResponse } from "next/server";
 import {
-  runCodeInContainer,
-  type CodeExecutionResult,
+  getDatabricksExecutionStatus,
+  startDatabricksExecution,
   type ExecutionInputFile,
   type ExecutionLanguage,
 } from "@/lib/codeRunner";
 import { execute, table } from "@/lib/databricks";
 import {
-  convertSasToPythonWithContext,
-  convertSasToRWithContext,
+  convertSasToPythonWithPipeline,
+  convertSasToRWithPipeline,
   refineConversion,
   getGeneratedConversionValidationIssues,
   normalizeGeneratedRCode,
 } from "@/lib/codex";
+import { analyzeSasSource, type SourceRouteSelection } from "@/lib/sasPipeline";
+import {
+  formatInputFileValidationError,
+  sanitizeInputFileName,
+  validateInputFileNames,
+} from "@/lib/inputFileValidation";
 import { getAuthUser } from "@/lib/firebase/server";
 import { randomUUID } from "node:crypto";
 
@@ -36,12 +42,35 @@ type AutoValidationAttempt = {
   result: CodeExecutionResult;
 };
 
+type CodeExecutionResult = {
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  timedOut: boolean;
+  durationMs: number;
+  detectedPackages: string[];
+  policyMode: "off" | "blocklist" | "allowlist";
+  images: string[];
+  artifacts: {
+    name: string;
+    contentType: string;
+    sizeBytes: number;
+    downloadUrl?: string;
+    contentBase64?: string;
+  }[];
+  backend: "databricks";
+};
+
 type AutoValidationResult = {
   code: string;
   attempts: AutoValidationAttempt[];
   passed: boolean;
   error?: string;
 };
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function parseAutoValidationAttempts() {
   const parsed = Number(process.env.CONVERSION_AUTO_VALIDATE_ATTEMPTS);
@@ -51,8 +80,16 @@ function parseAutoValidationAttempts() {
   return Math.min(Math.floor(parsed), 3);
 }
 
-function parseAutoRepairTimeoutMs() {
-  const parsed = Number(process.env.CONVERSION_AUTO_REPAIR_TIMEOUT_MS);
+function parseAutoValidationPollMs() {
+  const parsed = Number(process.env.CONVERSION_AUTO_VALIDATE_POLL_MS);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 2_000;
+  }
+  return Math.min(Math.floor(parsed), 10_000);
+}
+
+function parseAutoValidationTimeoutMs() {
+  const parsed = Number(process.env.CONVERSION_AUTO_VALIDATE_TIMEOUT_MS);
   if (!Number.isFinite(parsed) || parsed <= 0) {
     return 90_000;
   }
@@ -61,6 +98,31 @@ function parseAutoRepairTimeoutMs() {
 
 function executionPassed(result: CodeExecutionResult) {
   return !result.timedOut && result.exitCode === 0 && !result.stderr.trim();
+}
+
+function formatAutoRepairError(error: unknown, phase: "static" | "runtime") {
+  const prefix =
+    phase === "static"
+      ? "Automatic static validation repair failed"
+      : "Automatic repair failed";
+
+  if (!(error instanceof Error)) {
+    return `${prefix}.`;
+  }
+
+  if (/429|rate limit/i.test(error.message)) {
+    return `${prefix}: the model endpoint is rate-limited right now. The generated code and latest execution output were saved; please wait a minute and try repair again.`;
+  }
+
+  if (/403|multimodal content|not authorized/i.test(error.message)) {
+    return `${prefix}: the configured repair model rejected the request (${error.message}). The generated code and latest execution output were saved for review.`;
+  }
+
+  return `${prefix}: ${error.message}`;
+}
+
+function hasValidationTimeRemaining(deadlineMs: number | undefined, minimumMs: number) {
+  return !deadlineMs || Date.now() + minimumMs < deadlineMs;
 }
 
 function buildRepairInstruction(result: CodeExecutionResult, attempt: number) {
@@ -81,7 +143,10 @@ function buildRepairInstruction(result: CodeExecutionResult, attempt: number) {
   ].join("\n");
 }
 
-function buildStaticValidationRepairInstruction(issues: string[], attempt: number) {
+function buildStaticValidationRepairInstruction(
+  issues: string[],
+  attempt: number,
+) {
   return [
     `Automatic static validation attempt ${attempt} failed before execution.`,
     "Fix the generated code so it passes the application's known runtime-risk checks while preserving the original SAS logic, statistical methods, output schema, comments, and file-input behavior.",
@@ -92,28 +157,73 @@ function buildStaticValidationRepairInstruction(issues: string[], attempt: numbe
   ].join("\n");
 }
 
+async function runCodeToCompletion(
+  code: string,
+  language: ExecutionLanguage,
+  inputFiles: ExecutionInputFile[],
+  deadlineMs?: number,
+) {
+  const handle = await startDatabricksExecution(code, language, inputFiles);
+  const timeoutDeadline = Date.now() + parseAutoValidationTimeoutMs();
+  const deadline = deadlineMs
+    ? Math.min(timeoutDeadline, deadlineMs - 5_000)
+    : timeoutDeadline;
+  const pollMs = parseAutoValidationPollMs();
+
+  while (Date.now() < deadline) {
+    const status = await getDatabricksExecutionStatus(handle);
+    if (status.completed) {
+      return status.result;
+    }
+    await sleep(pollMs);
+  }
+
+  return {
+    stdout: "",
+    stderr:
+      "Automatic validation timed out while waiting for Databricks execution. The generated code was saved so you can review or run it manually.",
+    exitCode: null,
+    timedOut: true,
+    durationMs: parseAutoValidationTimeoutMs(),
+    detectedPackages: handle.detectedPackages,
+    policyMode: handle.policyMode,
+    images: [],
+    artifacts: [],
+    backend: "databricks",
+  } satisfies CodeExecutionResult;
+}
+
 async function runAutoValidation(params: {
   sasCode: string;
   code: string;
   language: ExecutionLanguage;
   additionalGuidance: string;
   referenceUrl: string;
+  sourceRouteSelection: SourceRouteSelection;
   inputFiles: ExecutionInputFile[];
+  deadlineMs?: number;
 }): Promise<AutoValidationResult> {
-  let currentCode = params.code;
+  let currentCode =
+    params.language === "R" ? normalizeGeneratedRCode(params.code) : params.code;
   const attempts: AutoValidationAttempt[] = [];
   const maxAttempts = parseAutoValidationAttempts();
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    if (params.language === "R") {
-      currentCode = normalizeGeneratedRCode(currentCode);
-    }
-
     const staticIssues = getGeneratedConversionValidationIssues(
       currentCode,
       params.language,
     );
     if (staticIssues.length > 0) {
+      if (!hasValidationTimeRemaining(params.deadlineMs, 60_000)) {
+        return {
+          code: currentCode,
+          attempts,
+          passed: false,
+          error:
+            "Automatic validation stopped before repair because the conversion request was close to its time limit. The generated code was saved for review.",
+        };
+      }
+
       try {
         currentCode = await refineConversion(
           params.sasCode,
@@ -123,23 +233,23 @@ async function runAutoValidation(params: {
           {
             additionalGuidance: params.additionalGuidance,
             referenceUrl: params.referenceUrl,
-            timeoutMs: parseAutoRepairTimeoutMs(),
+            inputFileNames: params.inputFiles.map((file) =>
+              sanitizeInputFileName(file.name),
+            ),
+            sourceRouteSelection: params.sourceRouteSelection,
+            skipValidation: true,
           },
         );
+        if (params.language === "R") {
+          currentCode = normalizeGeneratedRCode(currentCode);
+        }
       } catch (error) {
         return {
           code: currentCode,
           attempts,
           passed: false,
-          error:
-            error instanceof Error
-              ? `Automatic static validation repair failed: ${error.message}`
-              : "Automatic static validation repair failed.",
+          error: formatAutoRepairError(error, "static"),
         };
-      }
-
-      if (params.language === "R") {
-        currentCode = normalizeGeneratedRCode(currentCode);
       }
 
       if (attempt === maxAttempts) {
@@ -163,11 +273,11 @@ async function runAutoValidation(params: {
       continue;
     }
 
-    const result = await runCodeInContainer(
+    const result = await runCodeToCompletion(
       currentCode,
       params.language,
-      undefined,
       params.inputFiles,
+      params.deadlineMs,
     );
     attempts.push({ attempt, code: currentCode, result });
 
@@ -176,6 +286,16 @@ async function runAutoValidation(params: {
         code: currentCode,
         attempts,
         passed: executionPassed(result),
+      };
+    }
+
+    if (!hasValidationTimeRemaining(params.deadlineMs, 90_000)) {
+      return {
+        code: currentCode,
+        attempts,
+        passed: false,
+        error:
+          "Automatic validation ran the generated code, but skipped auto-repair because the request was close to its time limit. Review the execution output below.",
       };
     }
 
@@ -188,18 +308,22 @@ async function runAutoValidation(params: {
         {
           additionalGuidance: params.additionalGuidance,
           referenceUrl: params.referenceUrl,
-          timeoutMs: parseAutoRepairTimeoutMs(),
+          inputFileNames: params.inputFiles.map((file) =>
+            sanitizeInputFileName(file.name),
+          ),
+          sourceRouteSelection: params.sourceRouteSelection,
+          skipValidation: true,
         },
       );
+      if (params.language === "R") {
+        currentCode = normalizeGeneratedRCode(currentCode);
+      }
     } catch (error) {
       return {
         code: currentCode,
         attempts,
         passed: false,
-        error:
-          error instanceof Error
-            ? `Automatic repair failed: ${error.message}`
-            : "Automatic repair failed.",
+        error: formatAutoRepairError(error, "runtime"),
       };
     }
   }
@@ -240,6 +364,44 @@ async function persistExecutionRun(params: {
   );
 }
 
+function getRequestError(error: unknown, fallback: string) {
+  const message = error instanceof Error ? error.message : fallback;
+  const status =
+    error && typeof error === "object" && "status" in error
+      ? Number(error.status)
+      : undefined;
+
+  if (status === 429 || /\b429\b|rate limit/i.test(message)) {
+    return {
+      message:
+        message ||
+        "OpenAI model rate limit reached. Please wait a minute and try again.",
+      status: 429,
+    };
+  }
+
+  if (/OpenAI request timed out|Request timed out/i.test(message)) {
+    return {
+      message:
+        "The model request timed out before the conversion finished. Please try again; if it repeats, use a smaller SAS example or fewer extra context inputs.",
+      status: 504,
+    };
+  }
+
+  return {
+    message,
+    status: /^Generated (?:R|Python) failed (?:route-aware )?validation before saving\./.test(message)
+      ? 422
+      : 500,
+  };
+}
+
+function parseSourceRouteSelection(value: unknown): SourceRouteSelection {
+  return value === "sas" || value === "sudaan" || value === "mixed"
+    ? value
+    : "auto";
+}
+
 async function parseConversionRequest(request: Request) {
   const contentType = request.headers.get("content-type") || "";
   if (contentType.includes("multipart/form-data")) {
@@ -253,6 +415,7 @@ async function parseConversionRequest(request: Request) {
           content: Buffer.from(await file.arrayBuffer()),
         })),
     );
+
     return {
       sasCode:
         typeof formData.get("sasCode") === "string"
@@ -265,7 +428,8 @@ async function parseConversionRequest(request: Request) {
       rawLanguage:
         typeof formData.get("language") === "string"
           ? String(formData.get("language")).trim()
-          : "python",
+          : "r",
+      sourceRouteSelection: parseSourceRouteSelection(formData.get("sourceType")),
       forceRegenerate: formData.get("forceRegenerate") === "true",
       autoValidate: formData.get("autoValidate") === "true",
       additionalGuidance:
@@ -285,7 +449,8 @@ async function parseConversionRequest(request: Request) {
     sasCode: typeof body?.sasCode === "string" ? body.sasCode.trim() : "",
     name: typeof body?.name === "string" ? body.name.trim() : "",
     rawLanguage:
-      typeof body?.language === "string" ? body.language.trim() : "python",
+      typeof body?.language === "string" ? body.language.trim() : "r",
+    sourceRouteSelection: parseSourceRouteSelection(body?.sourceType),
     forceRegenerate: body?.forceRegenerate === true,
     autoValidate: body?.autoValidate === true,
     additionalGuidance:
@@ -295,18 +460,6 @@ async function parseConversionRequest(request: Request) {
     referenceUrl:
       typeof body?.referenceUrl === "string" ? body.referenceUrl.trim() : "",
     inputFiles: [] as ExecutionInputFile[],
-  };
-}
-
-function getRequestError(error: unknown, fallback: string) {
-  const message = error instanceof Error ? error.message : fallback;
-  return {
-    message,
-    status: /^Generated (?:R|Python) failed validation before saving\./.test(
-      message,
-    )
-      ? 422
-      : 500,
   };
 }
 
@@ -474,6 +627,7 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const requestDeadlineMs = Date.now() + 285_000;
   const user = await getAuthUser(request);
   if (!user?.appUserId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -483,6 +637,7 @@ export async function POST(request: Request) {
     sasCode,
     name,
     rawLanguage,
+    sourceRouteSelection,
     forceRegenerate,
     autoValidate,
     additionalGuidance,
@@ -499,9 +654,26 @@ export async function POST(request: Request) {
   if (!name) {
     return NextResponse.json({ error: "Name is required." }, { status: 400 });
   }
+  if (autoValidate) {
+    const inputFileValidation = validateInputFileNames(
+      sasCode,
+      inputFiles.map((file) => file.name),
+    );
+    if (inputFileValidation.missingFiles.length > 0) {
+      return NextResponse.json(
+        {
+          error: formatInputFileValidationError(inputFileValidation),
+          code: "input_file_mismatch",
+          inputFileValidation,
+        },
+        { status: 422 },
+      );
+    }
+  }
 
   try {
-    if (!forceRegenerate && !autoValidate) {
+    let reusableExisting: Record<string, unknown> | null = null;
+    if (!forceRegenerate) {
       const existingRows = await execute<Record<string, unknown>>(
         `SELECT id, user_id, name, language, sas_code, python_code, created_at, additional_guidance, reference_url
          FROM ${table("code_entries")}
@@ -509,56 +681,112 @@ export async function POST(request: Request) {
            AND coalesce(additional_guidance, '') = ?
            AND coalesce(reference_url, '') = ?
          ORDER BY created_at DESC
-         LIMIT 1`,
+         LIMIT 20`,
         [user.appUserId, language, sasCode, additionalGuidance, referenceUrl],
       );
-      const existing = existingRows[0];
+      const existing = existingRows.find((row) => {
+        const candidateCode = String(row.python_code || "");
+        return (
+          candidateCode.length > 0 &&
+          getGeneratedConversionValidationIssues(candidateCode, language)
+            .length === 0
+        );
+      });
+      const existingCode = String(existing?.python_code || "");
       if (existing) {
-        return NextResponse.json({
-          entry: {
-            id: existing.id,
-            userId: existing.user_id,
-            name: existing.name,
-            language: existing.language,
-            sasCode: existing.sas_code,
-            pythonCode: existing.python_code,
-            additionalGuidance: existing.additional_guidance,
-            referenceUrl: existing.reference_url,
-            createdAt: existing.created_at,
-            enhancements: [],
-            reviews: [],
-            runs: [],
-          },
-          reusedExisting: true,
-        });
+        if (!autoValidate) {
+          return NextResponse.json({
+            entry: {
+              id: existing.id,
+              userId: existing.user_id,
+              name: existing.name,
+              language: existing.language,
+              sasCode: existing.sas_code,
+              pythonCode: existingCode,
+              additionalGuidance: existing.additional_guidance,
+              referenceUrl: existing.reference_url,
+              createdAt: existing.created_at,
+              enhancements: [],
+              reviews: [],
+              runs: [],
+              conversionPipeline: {
+                sourceAnalysis: {
+                  ...analyzeSasSource(String(existing.sas_code || "")),
+                  selectedSourceType: "auto",
+                },
+                review: {
+                  passed: true,
+                  findings: [
+                    {
+                      severity: "info",
+                      code: "reused_existing_conversion",
+                      message:
+                        "Existing saved conversion was reused; generated-code review was not rerun.",
+                    },
+                  ],
+                },
+              },
+            },
+            reusedExisting: true,
+          });
+        }
+        reusableExisting = existing;
       }
     }
 
-    let pythonCode =
-      language === "R"
-        ? await convertSasToRWithContext(sasCode, {
+    const conversionResult = reusableExisting
+      ? {
+          code: String(reusableExisting.python_code || ""),
+          pipeline: {
+            sourceAnalysis: {
+              ...analyzeSasSource(sasCode),
+              selectedSourceType: sourceRouteSelection,
+            },
+            review: {
+              passed: true,
+              findings: [
+                {
+                  severity: "info" as const,
+                  code: "reused_existing_conversion_for_validation",
+                  message:
+                    "A statically valid saved conversion was reused as the automatic-validation starting point.",
+                },
+              ],
+            },
+          },
+        }
+      : language === "R"
+        ? await convertSasToRWithPipeline(sasCode, {
             additionalGuidance,
             referenceUrl,
+            inputFileNames: inputFiles.map((file) =>
+              sanitizeInputFileName(file.name),
+            ),
+            sourceRouteSelection,
             skipValidation: autoValidate,
           })
-        : await convertSasToPythonWithContext(sasCode, {
+        : await convertSasToPythonWithPipeline(sasCode, {
             additionalGuidance,
             referenceUrl,
+            inputFileNames: inputFiles.map((file) =>
+              sanitizeInputFileName(file.name),
+            ),
+            sourceRouteSelection,
             skipValidation: autoValidate,
           });
     const autoValidation = autoValidate
       ? await runAutoValidation({
           sasCode,
-          code: pythonCode,
+          code: conversionResult.code,
           language,
           additionalGuidance,
           referenceUrl,
+          sourceRouteSelection,
           inputFiles,
+          deadlineMs: requestDeadlineMs,
         })
       : null;
-    if (autoValidation) {
-      pythonCode = autoValidation.code;
-    }
+    const pythonCode = autoValidation?.code || conversionResult.code;
     const id = randomUUID();
     await execute(
       `INSERT INTO ${table(
@@ -616,8 +844,9 @@ export async function POST(request: Request) {
               createdAt: new Date().toISOString(),
             }))
           : [],
+        conversionPipeline: conversionResult.pipeline,
       },
-      reusedExisting: false,
+      reusedExisting: Boolean(reusableExisting),
       autoValidation: autoValidation
         ? {
             passed: autoValidation.passed,

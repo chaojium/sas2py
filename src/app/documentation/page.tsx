@@ -3,9 +3,10 @@ const pdfHref = "/docs/sas2py-documentation.pdf";
 const quickStart = [
   "Sign in with your internal email/password account.",
   "Open Studio and enter a required conversion name.",
-  "Choose Python or R as the target language.",
-  "Paste SAS code or upload a `.sas` file.",
-  "Run the conversion and review the generated output.",
+  "Choose R (the default) or Python and confirm the source type.",
+  "Paste SAS code or upload a `.sas` file, then attach any required data files.",
+  "Choose saved-result reuse or Force regenerate, and optionally enable auto-repair.",
+  "Run the conversion and review the generated code and validation output.",
   "Optionally edit, enhance, execute, review, and organize the saved entry.",
 ];
 
@@ -13,7 +14,8 @@ const manualSections = [
   {
     title: "What SAS2Py does",
     body: [
-      "SAS2Py converts SAS programs into Python or R, stores the original and generated code together, and keeps review and execution history with each saved conversion.",
+      "SAS2Py converts SAS and SAS-callable SUDAAN programs into R or Python, stores the original and generated code together, and keeps enhancement, review, and execution history with each saved conversion.",
+      "It supports modernization and review, but generated statistical code still requires subject-matter review when exact SAS or SUDAAN parity is important.",
       "The current application is organized into five user-facing areas: Dashboard, Studio, History, Documentation, and Settings.",
     ],
   },
@@ -28,9 +30,18 @@ const manualSections = [
     title: "Studio workflow",
     body: [
       "The Studio page is the main workspace. Each conversion requires a name before it can be submitted.",
-      "Users can select either Python or R as the output language. The app sends SAS code to the Azure OpenAI-backed conversion service and saves the result as a new conversion entry.",
+      "R is the default output language, and Python is also available. Source routes include Auto-detect / Not sure, SAS, SAS-callable SUDAAN, and Mixed SAS + SUDAAN.",
+      "SAS-callable SUDAAN means SUDAAN procedures invoked from SAS. Mixed SAS + SUDAAN is intended for files that combine substantial SAS preparation or reporting with SUDAAN analysis.",
       "If a `.sas` file is uploaded, the file contents populate the SAS editor and, if the conversion name is still blank, the file name becomes the default entry name.",
       "The generated code is shown in the output panel and is also stored in history immediately after a successful conversion.",
+    ],
+  },
+  {
+    title: "Guidance, URLs, and saved-result reuse",
+    body: [
+      "Additional guidance can define methods, constraints, or expected output. For an HTTP or HTTPS reference URL, SAS2Py attempts to fetch readable page text and supplies up to 8,000 characters to the model as untrusted methodological context. The fetch has a 15-second limit; private-network URLs and unsupported non-text content are not read.",
+      "Unless Force regenerate or auto-repair is selected, SAS2Py reuses the latest saved translation when the signed-in user, SAS source, output language, guidance, and reference URL all match.",
+      "Force regenerate requests a fresh model response. When auto-repair is selected without Force regenerate, SAS2Py reuses the latest statically valid matching translation as its starting point, executes it, and calls the model only if repair is needed. If no valid saved translation exists, it generates a new one first.",
     ],
   },
   {
@@ -45,16 +56,27 @@ const manualSections = [
     title: "Editing and enhancement",
     body: [
       "After conversion, users can switch into edit mode and directly modify the generated code. Saving writes the edited output back to the stored conversion entry.",
-      "Users can also submit an enhancement prompt, such as performance improvements or style changes. The app refines the current conversion while preserving the SAS logic and returns an updated version of the code.",
+      "Apply enhancement sends the current source, generated code, and instruction to the refinement service. It can be used on an entry opened with View latest; a new conversion is not required.",
+      "The app requires the enhancement to make a real code change and retries once when the first response is unchanged. An unchanged response is reported instead of being saved as a successful enhancement.",
       "The converted file can be downloaded locally as `.py` for Python output or `.R` for R output.",
+    ],
+  },
+  {
+    title: "Input files and automatic repair",
+    body: [
+      "Attach input data in the source section when auto-repair or execution needs it. Before auto-repair, SAS2Py checks the filenames referenced by the SAS source and asks for the correct files when an exact name is missing.",
+      "Input files remain attached when switching R and Python and when View latest opens the same SAS source in the current browser session. A different source clears them. File contents are not stored in conversion history and cannot be restored after a refresh.",
+      "When Run generated code and auto-repair runtime errors before saving is selected, SAS2Py applies static checks, executes the target-language code in Databricks, and makes a limited repair attempt after a failure. The latest code and execution output are saved even when further review is needed.",
+      "Auto-repair does not run SAS/SUDAAN or compare against an unknown expected SAS result. The four repository examples are internal regression tests and are not included in user conversions.",
     ],
   },
   {
     title: "Executing converted code",
     body: [
-      "Converted code can be executed from the Studio. Execution results include stdout, stderr, exit code, runtime duration, timeout status, detected packages, and any generated plot images.",
-      "Input files can be attached before execution. The runtime exposes them through the `SAS2PY_INPUT_DIR` folder. In Docker runs this path is `/workspace/input`. In Databricks runs this path is `/tmp/sas2py-input` or a temporary directory created by the runner payload.",
-      "In the current implementation, Python execution defaults to Databricks when no backend is specified. R execution defaults to Docker unless the deployment is configured differently.",
+      "Converted code can be executed from the Studio. Execution results include Run Output, Errors / Warnings, exit code, runtime duration, timeout status, detected packages, generated plot images, and downloadable files.",
+      "Input files can be attached before execution. The Databricks runtime exposes them through the `SAS2PY_INPUT_DIR` folder, usually as a temporary directory created by the runner payload.",
+      "Python and R execution both run through Databricks Jobs.",
+      "When the SAS source requests one Excel workbook and no CSV files, generated R and Python code should expose one workbook with the requested sheets rather than intermediate CSV files.",
       "Large uploaded execution files may require Azure Blob Storage support when Databricks is used. If the Databricks notebook parameter size limit is exceeded and Blob handoff is not configured, execution is rejected.",
       "Package policy is enforced before execution. Depending on deployment settings, the runner may block code that imports disallowed packages or packages outside an allowlist.",
     ],
@@ -79,7 +101,7 @@ const manualSections = [
     title: "Dashboard and settings",
     body: [
       "The Dashboard shows summary counts for stored conversions and reviews for the signed-in user.",
-      "The Settings page currently supports profile maintenance only. Users can update the display name associated with their account.",
+      "The Settings page supports profile maintenance and a persistent dark-mode preference. Users can update their display name and switch the color theme for the full application.",
     ],
   },
   {

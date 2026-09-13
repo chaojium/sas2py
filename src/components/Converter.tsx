@@ -46,6 +46,8 @@ type SasAnalysis = {
   validationChecks: string[];
 };
 
+type SourceType = "auto" | "sas" | "sudaan" | "mixed";
+
 type ConversationMessage = {
   id: string;
   role: "user" | "assistant" | string;
@@ -86,6 +88,33 @@ type Entry = {
   runs: Run[];
 };
 
+const SOURCE_TYPE_OPTIONS: {
+  value: SourceType;
+  label: string;
+  description: string;
+}[] = [
+  {
+    value: "auto",
+    label: "Auto-detect / Not sure",
+    description: "Let SAS2Py choose the route.",
+  },
+  {
+    value: "sas",
+    label: "SAS",
+    description: "Regular SAS code, including DATA steps, PROC SQL, and SAS survey procedures.",
+  },
+  {
+    value: "sudaan",
+    label: "SAS-callable SUDAAN",
+    description: "Code using PROC DESCRIPT, CROSSTAB, RLOGIST, MULTILOG, NEST, SUBPOPN, or LEVELS.",
+  },
+  {
+    value: "mixed",
+    label: "Mixed SAS + SUDAAN",
+    description: "Regular SAS data preparation plus SUDAAN analysis in the same file.",
+  },
+];
+
 type EntryGroup = {
   id: string;
   name: string;
@@ -114,7 +143,7 @@ type ExecutionResult = {
     downloadUrl?: string;
     contentBase64?: string;
   }[];
-  backend?: "databricks" | "docker";
+  backend?: "databricks";
 };
 
 type ExecuteApiResponse = {
@@ -135,7 +164,7 @@ type ConvertApiResponse = {
     passed: boolean;
     attempts: number;
     error?: string;
-    finalResult: ExecutionResult | null;
+    finalResult?: ExecutionResult | null;
   } | null;
   error?: string;
 };
@@ -216,6 +245,11 @@ function buildEntryGroupKey(entry: Entry) {
   return `${entry.name.trim().toLowerCase()}::${entry.sasCode.trim()}`;
 }
 
+function isSameSasSource(left: string, right: string) {
+  const normalize = (value: string) => value.replace(/\r\n/g, "\n").trim();
+  return normalize(left) === normalize(right);
+}
+
 function getChangedLineNumbers(previousCode: string, nextCode: string) {
   const previousLines = previousCode.split("\n");
   const nextLines = nextCode.split("\n");
@@ -267,7 +301,8 @@ export default function Converter() {
   const isAuthed = status === "authenticated";
   const [sasCode, setSasCode] = useState("");
   const [name, setName] = useState("");
-  const [language, setLanguage] = useState<"PYTHON" | "R">("PYTHON");
+  const [language, setLanguage] = useState<"PYTHON" | "R">("R");
+  const [sourceType, setSourceType] = useState<SourceType>("auto");
   const [additionalGuidance, setAdditionalGuidance] = useState("");
   const [referenceUrl, setReferenceUrl] = useState("");
   const [pythonCode, setPythonCode] = useState("");
@@ -395,6 +430,9 @@ export default function Converter() {
       setError("Name is required before converting.");
       return;
     }
+    const analysisToPreserve = currentEntryId
+      ? sasAnalysisByEntry[currentEntryId] || null
+      : draftSasAnalysis;
     setLoading(true);
     setError(null);
     setExecuteError(null);
@@ -403,39 +441,39 @@ export default function Converter() {
     setSavedPythonCode("");
     setCurrentEntryId(null);
     setIsEditingCode(false);
-    setDraftSasAnalysis(null);
     try {
-      const response =
-        autoValidate && executionInputFiles.length > 0
-          ? await (() => {
-              const formData = new FormData();
-              formData.set("sasCode", sasCode);
-              formData.set("name", name);
-              formData.set("language", language);
-              formData.set("forceRegenerate", String(forceRegenerate));
-              formData.set("autoValidate", String(autoValidate));
-              formData.set("additionalGuidance", additionalGuidance);
-              formData.set("referenceUrl", referenceUrl);
-              for (const file of executionInputFiles) {
-                formData.append("inputFiles", file);
-              }
-              return authFetch("/api/conversions", {
-                method: "POST",
-                body: formData,
-              });
-            })()
-          : await authFetch("/api/conversions", {
+      const response = autoValidate
+        ? await (() => {
+            const formData = new FormData();
+            formData.set("sasCode", sasCode);
+            formData.set("name", name);
+            formData.set("language", language);
+            formData.set("sourceType", sourceType);
+            formData.set("forceRegenerate", String(forceRegenerate));
+            formData.set("autoValidate", String(autoValidate));
+            formData.set("additionalGuidance", additionalGuidance);
+            formData.set("referenceUrl", referenceUrl);
+            for (const file of executionInputFiles) {
+              formData.append("inputFiles", file);
+            }
+            return authFetch("/api/conversions", {
               method: "POST",
-              body: JSON.stringify({
-                sasCode,
-                name,
-                language,
-                forceRegenerate,
-                autoValidate,
-                additionalGuidance,
-                referenceUrl,
-              }),
+              body: formData,
             });
+          })()
+        : await authFetch("/api/conversions", {
+            method: "POST",
+            body: JSON.stringify({
+              sasCode,
+              name,
+              language,
+              sourceType,
+              forceRegenerate,
+              autoValidate,
+              additionalGuidance,
+              referenceUrl,
+            }),
+          });
       const { data, text } = await parseApiResponse<ConvertApiResponse>(
         response,
       );
@@ -457,8 +495,8 @@ export default function Converter() {
       setExecuteResult(data.autoValidation?.finalResult || null);
       setExecuteError(null);
       setCurrentEntryId(data.entry.id);
-      if (data.entry.sasAnalysis) {
-        const sasAnalysis = data.entry.sasAnalysis;
+      const sasAnalysis = data.entry.sasAnalysis || analysisToPreserve;
+      if (sasAnalysis) {
         setSasAnalysisByEntry((prev) => ({
           ...prev,
           [data.entry.id]: sasAnalysis,
@@ -466,7 +504,7 @@ export default function Converter() {
         setDraftSasAnalysis(sasAnalysis);
         setSasAnalysisError(null);
       }
-      setLanguage(data.entry.language || "PYTHON");
+      setLanguage(data.entry.language || "R");
       setName(data.entry.name || name);
       setAdditionalGuidance(data.entry.additionalGuidance || "");
       setReferenceUrl(data.entry.referenceUrl || "");
@@ -481,8 +519,8 @@ export default function Converter() {
           data.autoValidation.error
             ? `${data.autoValidation.error} The generated code was saved with the latest execution output below.`
             : data.autoValidation.passed
-            ? `Automatic validation passed after ${data.autoValidation.attempts} attempt${data.autoValidation.attempts === 1 ? "" : "s"}.`
-            : `Automatic validation finished after ${data.autoValidation.attempts} attempt${data.autoValidation.attempts === 1 ? "" : "s"}, but the final run still reported an error. Review the execution output below.`,
+              ? `Automatic validation passed after ${data.autoValidation.attempts} attempt${data.autoValidation.attempts === 1 ? "" : "s"}.`
+              : `Automatic validation finished after ${data.autoValidation.attempts} attempt${data.autoValidation.attempts === 1 ? "" : "s"}, but the final run still reported an error. Review the execution output below.`,
         );
       } else if (data.reusedExisting) {
         setError(
@@ -694,7 +732,7 @@ export default function Converter() {
     kind: "stdout" | "stderr",
     text: string,
   ) => {
-    const label = kind === "stdout" ? "STDOUT" : "STDERR";
+    const label = kind === "stdout" ? "Run Output" : "Errors / Warnings";
     const content = text || "(no output)";
     setConversationPrompt((previous) => {
       const prefix = previous.trim() ? `${previous.trim()}\n\n` : "";
@@ -1088,13 +1126,17 @@ export default function Converter() {
     return Array.from({ length: lineCount }, (_, index) => index + 1);
   }, [sasCode]);
 
-  const clearActiveConversion = useCallback(() => {
+  const clearActiveConversion = useCallback(
+    (options: { clearInputFiles?: boolean } = {}) => {
+    setError(null);
     setPythonCode("");
     setSavedPythonCode("");
     setCurrentEntryId(null);
     setExecuteResult(null);
     setExecuteError(null);
-    setExecutionInputFiles([]);
+      if (options.clearInputFiles !== false) {
+        setExecutionInputFiles([]);
+      }
     setConversationPrompt("");
     setConversationError(null);
     setShowAllConversationMessages(false);
@@ -1103,17 +1145,22 @@ export default function Converter() {
     setExpandedEnhancements({});
     setIsEditingCode(false);
     setHighlightedCodeLines([]);
-  }, []);
+    },
+    [],
+  );
 
   const handleLanguageSelect = useCallback(
     (nextLanguage: "PYTHON" | "R") => {
       if (nextLanguage === language) {
         return;
       }
+      if (currentEntryId) {
+        setDraftSasAnalysis(sasAnalysisByEntry[currentEntryId] || null);
+      }
       setLanguage(nextLanguage);
-      clearActiveConversion();
+      clearActiveConversion({ clearInputFiles: false });
     },
-    [clearActiveConversion, language],
+    [clearActiveConversion, currentEntryId, language, sasAnalysisByEntry],
   );
 
   const selectPreferredEntry = useCallback(
@@ -1123,31 +1170,38 @@ export default function Converter() {
     [language],
   );
 
-  const handleViewEntry = useCallback(async (entry: Entry) => {
-    setSasCode(entry.sasCode);
-    setPythonCode(entry.pythonCode);
-    setSavedPythonCode(entry.pythonCode);
-    setExecuteResult(
-      entry.runs.length > 0 ? runToExecutionResult(entry.runs[0]) : null,
-    );
-    setExecuteError(null);
-    setExecutionInputFiles([]);
-    setUploadedSasFileName(null);
-    setCurrentEntryId(entry.id);
-    setConversationPrompt("");
-    setConversationError(null);
-    setShowAllConversationMessages(false);
-    setShowAllEnhancements(false);
-    setExpandedConversationMessages({});
-    setExpandedEnhancements({});
-    setName(entry.name);
-    setLanguage(entry.language);
-    setAdditionalGuidance(entry.additionalGuidance || "");
-    setReferenceUrl(entry.referenceUrl || "");
-    setIsEditingCode(false);
-    setSasAnalysisError(null);
-    setHighlightedCodeLines([]);
-  }, []);
+  const handleViewEntry = useCallback(
+    async (entry: Entry) => {
+      const keepCurrentInputFiles = isSameSasSource(entry.sasCode, sasCode);
+      setSasCode(entry.sasCode);
+      setPythonCode(entry.pythonCode);
+      setSavedPythonCode(entry.pythonCode);
+      setExecuteResult(
+        entry.runs.length > 0 ? runToExecutionResult(entry.runs[0]) : null,
+      );
+      setExecuteError(null);
+      if (!keepCurrentInputFiles) {
+        setExecutionInputFiles([]);
+        setUploadedSasFileName(null);
+      }
+      setCurrentEntryId(entry.id);
+      setConversationPrompt("");
+      setConversationError(null);
+      setShowAllConversationMessages(false);
+      setShowAllEnhancements(false);
+      setExpandedConversationMessages({});
+      setExpandedEnhancements({});
+      setName(entry.name);
+      setLanguage(entry.language);
+      setSourceType("auto");
+      setAdditionalGuidance(entry.additionalGuidance || "");
+      setReferenceUrl(entry.referenceUrl || "");
+      setIsEditingCode(false);
+      setSasAnalysisError(null);
+      setHighlightedCodeLines([]);
+    },
+    [sasCode],
+  );
 
   useEffect(() => {
     const requestedEntryId = searchParams.get("entryId");
@@ -1211,17 +1265,6 @@ export default function Converter() {
               </span>
               <button
                 type="button"
-                onClick={() => handleLanguageSelect("PYTHON")}
-                className={`rounded-full border px-4 py-2 text-xs uppercase tracking-[0.2em] transition ${
-                  language === "PYTHON"
-                    ? "border-[var(--foreground)] bg-[var(--foreground)] text-[var(--background)]"
-                    : "border-[var(--border)] text-[var(--foreground)] hover:bg-white/70"
-                }`}
-              >
-                Python
-              </button>
-              <button
-                type="button"
                 onClick={() => handleLanguageSelect("R")}
                 className={`rounded-full border px-4 py-2 text-xs uppercase tracking-[0.2em] transition ${
                   language === "R"
@@ -1231,6 +1274,55 @@ export default function Converter() {
               >
                 R
               </button>
+              <button
+                type="button"
+                onClick={() => handleLanguageSelect("PYTHON")}
+                className={`rounded-full border px-4 py-2 text-xs uppercase tracking-[0.2em] transition ${
+                  language === "PYTHON"
+                    ? "border-[var(--foreground)] bg-[var(--foreground)] text-[var(--background)]"
+                    : "border-[var(--border)] text-[var(--foreground)] hover:bg-white/70"
+                }`}
+              >
+                Python
+              </button>
+            </div>
+            <div className="space-y-3">
+              <span className="text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
+                Source type
+              </span>
+              <div className="grid gap-3 md:grid-cols-2">
+                {SOURCE_TYPE_OPTIONS.map((option) => {
+                  const selected = sourceType === option.value;
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => {
+                        setSourceType(option.value);
+                        clearActiveConversion();
+                      }}
+                      className={`min-h-[86px] rounded-2xl border px-4 py-3 text-left transition ${
+                        selected
+                          ? "border-[var(--foreground)] bg-[var(--foreground)] text-[var(--background)]"
+                          : "border-[var(--border)] bg-white/70 text-[var(--foreground)] hover:bg-white"
+                      }`}
+                    >
+                      <span className="block text-sm font-semibold">
+                        {option.label}
+                      </span>
+                      <span
+                        className={`mt-1 block text-xs leading-5 ${
+                          selected
+                            ? "text-[color:color-mix(in_oklab,var(--background)_82%,var(--foreground))]"
+                            : "text-[var(--muted)]"
+                        }`}
+                      >
+                        {option.description}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
             <textarea
               className="min-h-[110px] w-full rounded-2xl border border-[var(--border)] bg-white/80 p-4 text-sm shadow-inner focus:outline-none focus:ring-2 focus:ring-[var(--secondary)]"
@@ -1305,10 +1397,14 @@ export default function Converter() {
                 </label>
                 {executionInputFiles.length > 0 ? (
                   <>
-                    <span className="text-xs text-[var(--muted)]">
-                      {executionInputFiles.length} input file
-                      {executionInputFiles.length === 1 ? "" : "s"} attached
-                      {" "}for execution
+                    <span
+                      role="status"
+                      aria-live="polite"
+                      className="text-xs text-emerald-700"
+                    >
+                      Upload successful: {executionInputFiles.length} input file
+                      {executionInputFiles.length === 1 ? "" : "s"} attached.
+                      {" "}Upload more if needed.
                     </span>
                     <button
                       onClick={handleClearExecutionInputFiles}
@@ -1317,13 +1413,22 @@ export default function Converter() {
                       {confirmClearExecutionFiles ? "Confirm clear" : "Clear files"}
                     </button>
                   </>
-                ) : null}
+                ) : (
+                  <span className="text-xs text-[var(--muted)]">
+                    Attach data files if you want auto-repair to run generated code.
+                  </span>
+                )}
               </div>
               <p className="mt-2 text-sm text-[var(--muted)]">
-                Attach data files needed for automatic validation or manual code
-                execution. The runtime exposes them through{" "}
-                <code>SAS2PY_INPUT_DIR</code>.
+                Uploaded files are exposed to the Databricks runtime through the{" "}
+                <code>SAS2PY_INPUT_DIR</code> folder.
               </p>
+              {autoValidate && executionInputFiles.length === 0 ? (
+                <p className="mt-2 text-sm text-amber-700">
+                  Auto-repair is selected. Add the associated input file(s) so the
+                  app can run and repair the generated code before saving.
+                </p>
+              ) : null}
               {executionInputFiles.length > 0 ? (
                 <div className="mt-3 space-y-2">
                   {executionInputFiles.map((file, index) => (
@@ -1417,15 +1522,18 @@ export default function Converter() {
                 Clear
               </button>
               {error ? (
-                <span className="text-sm text-red-600">{error}</span>
+                <span className="whitespace-pre-line text-sm text-red-600">
+                  {error}
+                </span>
               ) : null}
             </div>
             <label className="flex items-center gap-2 text-sm text-[var(--muted)]">
               <input
                 type="checkbox"
                 checked={forceRegenerate}
+                disabled={loading}
                 onChange={(event) => setForceRegenerate(event.target.checked)}
-                className="h-4 w-4 rounded border-[var(--border)]"
+                className="h-4 w-4 rounded border-[var(--border)] disabled:cursor-not-allowed disabled:opacity-50"
               />
               Force regenerate instead of reusing the latest saved translation
             </label>
@@ -1433,11 +1541,17 @@ export default function Converter() {
               <input
                 type="checkbox"
                 checked={autoValidate}
+                disabled={loading}
                 onChange={(event) => setAutoValidate(event.target.checked)}
-                className="mt-0.5 h-4 w-4 rounded border-[var(--border)]"
+                className="mt-0.5 h-4 w-4 rounded border-[var(--border)] disabled:cursor-not-allowed disabled:opacity-50"
               />
               <span>
-                Automatically run and repair generated code before saving
+                Run generated code and auto-repair runtime errors before saving
+                {autoValidate && executionInputFiles.length === 0 ? (
+                  <span className="mt-1 block text-amber-700">
+                    Associated input file(s) are needed for runtime auto-repair.
+                  </span>
+                ) : null}
               </span>
             </label>
           </div>
@@ -1521,7 +1635,9 @@ export default function Converter() {
                   : `Run ${language === "R" ? "R" : "Python"} code`}
               </button>
               {executeError ? (
-                <span className="text-sm text-red-600">{executeError}</span>
+                <span className="whitespace-pre-line text-sm text-red-600">
+                  {executeError}
+                </span>
               ) : null}
             </div>
             {executeResult ? (
@@ -1543,7 +1659,7 @@ export default function Converter() {
                   <div>
                     <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
                       <p className="text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
-                        Stdout
+                        Run Output
                       </p>
                       <div className="flex flex-wrap items-center gap-2">
                         <button
@@ -1588,7 +1704,7 @@ export default function Converter() {
                   <div>
                     <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
                       <p className="text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
-                        Stderr
+                        Errors / Warnings
                       </p>
                       <div className="flex flex-wrap items-center gap-2">
                         <button
@@ -2090,7 +2206,7 @@ export default function Converter() {
                                   </span>
                                 </div>
                                 <p className="mt-2 text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
-                                  Stdout
+                                  Run Output
                                 </p>
                                 <div className="mt-2">
                                   <CodeBlock
@@ -2101,7 +2217,7 @@ export default function Converter() {
                                   />
                                 </div>
                                 <p className="mt-3 text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
-                                  Stderr
+                                  Errors / Warnings
                                 </p>
                                 <div className="mt-2">
                                   <CodeBlock

@@ -1,6 +1,7 @@
 @import "tailwindcss";
 
 :root {
+  color-scheme: light;
   --background: #f8f4ee;
   --foreground: #1e1b16;
   --primary: #ff6a3d;
@@ -8,11 +9,44 @@
   --card: #fffaf4;
   --border: #e2d7c6;
   --muted: #6b6257;
+  --body-background:
+    radial-gradient(circle at top left, #ffe7d4 0%, transparent 45%),
+    radial-gradient(circle at 80% 10%, #c7f0ea 0%, transparent 35%),
+    linear-gradient(135deg, #f8f4ee 0%, #f5efe7 100%);
+  --surface-solid: #ffffff;
+  --surface-90: rgb(255 255 255 / 0.9);
+  --surface-85: rgb(255 255 255 / 0.85);
+  --surface-80: rgb(255 255 255 / 0.8);
+  --surface-70: rgb(255 255 255 / 0.7);
+  --surface-60: rgb(255 255 255 / 0.6);
+  --surface-50: rgb(255 255 255 / 0.5);
   --font-display:
     "Aptos", "Segoe UI", "Trebuchet MS", "Helvetica Neue", Arial, sans-serif;
   --font-mono:
     "Cascadia Code", "Consolas", "SFMono-Regular", "Liberation Mono",
     "Courier New", monospace;
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #171918;
+  --foreground: #f4efe7;
+  --primary: #ff7a52;
+  --secondary: #59c7b5;
+  --card: #242824;
+  --border: #4b544d;
+  --muted: #bbb4aa;
+  --body-background:
+    radial-gradient(circle at top left, #3a2822 0%, transparent 43%),
+    radial-gradient(circle at 80% 10%, #173a33 0%, transparent 35%),
+    linear-gradient(135deg, #171918 0%, #20221f 100%);
+  --surface-solid: #292d29;
+  --surface-90: rgb(41 45 41 / 0.94);
+  --surface-85: rgb(41 45 41 / 0.9);
+  --surface-80: rgb(41 45 41 / 0.86);
+  --surface-70: rgb(41 45 41 / 0.78);
+  --surface-60: rgb(41 45 41 / 0.7);
+  --surface-50: rgb(41 45 41 / 0.62);
 }
 
 @theme inline {
@@ -23,19 +57,81 @@
 }
 
 body {
-  background:
-    radial-gradient(circle at top left, #ffe7d4 0%, transparent 45%),
-    radial-gradient(circle at 80% 10%, #c7f0ea 0%, transparent 35%),
-    linear-gradient(135deg, #f8f4ee 0%, #f5efe7 100%);
+  background: var(--body-background);
   color: var(--foreground);
   font-family: var(--font-display), system-ui, sans-serif;
   min-height: 100vh;
+  transition:
+    background 180ms ease,
+    color 180ms ease;
 }
 
 .glass-card {
   background: color-mix(in oklab, var(--card) 92%, white 8%);
   border: 1px solid var(--border);
   box-shadow: 0 24px 50px -30px rgba(30, 27, 22, 0.4);
+}
+
+html[data-theme="dark"] .glass-card {
+  background: color-mix(in oklab, var(--card) 96%, white 4%);
+  box-shadow: 0 24px 50px -30px rgb(0 0 0 / 0.78);
+}
+
+html[data-theme="dark"] .bg-white {
+  background-color: var(--surface-solid) !important;
+}
+
+html[data-theme="dark"] .bg-white\/90 {
+  background-color: var(--surface-90) !important;
+}
+
+html[data-theme="dark"] .bg-white\/85 {
+  background-color: var(--surface-85) !important;
+}
+
+html[data-theme="dark"] .bg-white\/80 {
+  background-color: var(--surface-80) !important;
+}
+
+html[data-theme="dark"] .bg-white\/70 {
+  background-color: var(--surface-70) !important;
+}
+
+html[data-theme="dark"] .bg-white\/60 {
+  background-color: var(--surface-60) !important;
+}
+
+html[data-theme="dark"] .bg-white\/50 {
+  background-color: var(--surface-50) !important;
+}
+
+html[data-theme="dark"] .hover\:bg-white:hover,
+html[data-theme="dark"] .hover\:bg-white\/70:hover,
+html[data-theme="dark"] .hover\:bg-white\/60:hover {
+  background-color: color-mix(in oklab, var(--surface-solid) 84%, white 16%) !important;
+}
+
+html[data-theme="dark"] input,
+html[data-theme="dark"] textarea,
+html[data-theme="dark"] select {
+  color: var(--foreground);
+}
+
+html[data-theme="dark"] input::placeholder,
+html[data-theme="dark"] textarea::placeholder {
+  color: #978f85;
+}
+
+html[data-theme="dark"] .text-red-600 {
+  color: #ff8b82 !important;
+}
+
+html[data-theme="dark"] .text-amber-700 {
+  color: #f4c36a !important;
+}
+
+html[data-theme="dark"] .text-emerald-700 {
+  color: #6ed6aa !important;
 }
 
 .grain {
@@ -49,6 +145,11 @@ body {
   background-image: url("data:image/svg+xml,%3Csvg width='120' height='120' viewBox='0 0 120 120' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)' opacity='0.06'/%3E%3C/svg%3E");
   pointer-events: none;
   mix-blend-mode: multiply;
+}
+
+html[data-theme="dark"] .grain::after {
+  opacity: 0.36;
+  mix-blend-mode: soft-light;
 }
 
 .fade-up {

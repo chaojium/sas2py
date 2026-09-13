@@ -24,10 +24,11 @@ Build a secure web application that converts SAS programs into Python or R, pres
 2. User pastes SAS code or uploads a `.sas` file.
 3. User selects target language: Python or R.
 4. User optionally provides additional guidance or a reference URL.
-5. User chooses whether to reuse an existing matching conversion or force a fresh generation.
-6. Backend sends the SAS source to the AI conversion layer.
-7. Backend validates generated code before saving.
-8. UI displays generated code and saves the conversion record.
+5. User optionally selects source type: Auto-detect / Not sure, SAS, SAS with SUDAAN, or Mixed SAS + SUDAAN.
+6. User chooses whether to reuse an existing matching conversion or force a fresh generation.
+7. Backend sends the SAS source to the AI conversion layer.
+8. Backend validates generated code before saving.
+9. UI displays generated code and saves the conversion record.
 
 ### Refinement
 
@@ -47,9 +48,7 @@ Build a secure web application that converts SAS programs into Python or R, pres
 
 1. User runs generated Python or R code.
 2. User can upload execution input files.
-3. Backend selects an execution backend:
-   - Python defaults to Databricks Jobs.
-   - R can use Docker or Databricks depending on configuration.
+3. Backend submits execution through Databricks Jobs for Python and R.
 4. Runner sets `SAS2PY_INPUT_DIR` so converted code can read uploaded files without hardcoded local paths.
 5. Application captures stdout, stderr, exit code, timeout status, duration, detected packages, policy mode, images, and artifacts.
 6. Execution results are stored and shown in history.
@@ -97,13 +96,32 @@ Build a secure web application that converts SAS programs into Python or R, pres
 - Preserve SAS comments, headers, banners, and file metadata.
 - Preserve analytical logic, not only syntax.
 - Support Python and R target languages.
+- Classify each submitted source before conversion as Base SAS, SAS survey, SUDAAN, or mixed.
+- Allow users to override routing with simple source type choices: Auto-detect / Not sure, SAS, SAS with SUDAAN, and Mixed SAS + SUDAAN.
+- Extract route-relevant structure before generation, including procedures, LIBNAME/data hints, NEST, STRATA, CLUSTER, WEIGHT, SUBPOPN, DOMAIN, SUBGROUP, LEVELS, TABLES, MODEL, and REFLEVEL statements where present.
+- Use route-specific prompt fragments so Base SAS, SAS survey procedures, and SUDAAN procedures receive different translation instructions.
+- Treat mixed programs as a hybrid translation problem: preserve Base SAS data preparation while translating SAS survey/SUDAAN analytical blocks with survey-design-aware logic.
+- Return the route decision, confidence, signals, extracted blocks, and validation findings with newly generated conversions for auditability.
 - Avoid hardcoded local machine paths in generated code.
 - Normalize dataset column names consistently for target-language safety.
 - Preserve confidence interval methods, percent/proportion scale, degrees of freedom, and weighting assumptions where possible.
 - Handle SAS/SUDAAN survey procedures with survey-design-aware logic.
 - Make generated code deterministic unless the SAS source explicitly uses randomness.
 - Return code only for conversion/refinement calls, not Markdown explanations.
-- Validate generated Python or R before saving.
+- Validate generated Python or R before saving, including route-aware checks for missing SUDAAN/SAS survey design, missing weights, unsafe local paths, and known runtime-invalid target-language patterns.
+
+## Conversion Pipeline
+
+The conversion backend uses a staged pipeline:
+
+1. Deterministic router/extractor strips comments, detects procedures and route-specific statements, and emits structured source analysis.
+2. The selected Python/R conversion prompt includes route-specific instructions and extracted source facts.
+3. The model generates target-language code.
+4. Existing syntax/runtime-risk validators run.
+5. A route-aware reviewer checks whether generated code appears to preserve detected SAS survey or SUDAAN semantics.
+6. The API saves only conversions that pass blocking validation and returns the pipeline report with the response.
+
+The router must be conservative. Low-confidence or mixed signals should not silently erase dialect differences; they should be surfaced in the pipeline report and handled by hybrid route instructions.
 
 ## Execution Requirements
 

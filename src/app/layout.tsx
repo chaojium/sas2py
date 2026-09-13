@@ -3,6 +3,19 @@ import Providers from "@/app/providers";
 import Header from "@/components/Header";
 import "./globals.css";
 
+const themeInitializationScript = `
+  (function () {
+    try {
+      var savedTheme = window.localStorage.getItem("sas2py-theme");
+      var theme = savedTheme === "dark" ? "dark" : "light";
+      document.documentElement.dataset.theme = theme;
+      document.documentElement.style.colorScheme = theme;
+    } catch (_) {
+      document.documentElement.dataset.theme = "light";
+    }
+  })();
+`;
+
 export const metadata: Metadata = {
   title: "SAS2Py Studio",
   description: "Convert SAS code to Python or R with GPT-5.5, review, and collaborate.",
@@ -14,7 +27,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeInitializationScript }} />
+      </head>
       <body className="antialiased">
         <Providers>
           <Header />

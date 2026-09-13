@@ -3,9 +3,11 @@
 import { useEffect, useState, type FormEvent } from "react";
 import AuthButton from "@/components/AuthButton";
 import { useAuth } from "@/components/AuthProvider";
+import { useTheme } from "@/components/ThemeProvider";
 
 export default function SettingsClient() {
   const { user, status, refreshUser } = useAuth();
+  const { theme, setTheme } = useTheme();
   const [displayName, setDisplayName] = useState("");
   const [savedName, setSavedName] = useState("");
   const [message, setMessage] = useState<string | null>(null);
@@ -87,9 +89,39 @@ export default function SettingsClient() {
           <p className="text-xs uppercase tracking-[0.3em] text-[var(--muted)]">
             Settings
           </p>
-          <h1 className="text-3xl font-semibold">Profile</h1>
+          <h1 className="text-3xl font-semibold">Preferences and profile</h1>
         </div>
         <AuthButton />
+      </div>
+      <div className="mt-8 flex items-center justify-between gap-6 rounded-2xl border border-[var(--border)] bg-white/80 p-6">
+        <div>
+          <p className="text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
+            Appearance
+          </p>
+          <p className="mt-2 text-lg font-semibold">Dark mode</p>
+          <p className="mt-1 text-sm text-[var(--muted)]">
+            Use a darker color theme throughout SAS2Py.
+          </p>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={theme === "dark"}
+          aria-label="Toggle dark mode"
+          onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+          className={`relative h-7 w-12 shrink-0 rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--secondary)] focus:ring-offset-2 focus:ring-offset-[var(--background)] ${
+            theme === "dark"
+              ? "border-[var(--secondary)] bg-[var(--secondary)]"
+              : "border-[var(--border)] bg-[var(--border)]"
+          }`}
+        >
+          <span
+            aria-hidden="true"
+            className={`absolute top-0.5 h-5 w-5 rounded-full bg-[var(--background)] shadow-sm transition-transform ${
+              theme === "dark" ? "translate-x-5" : "translate-x-0.5"
+            }`}
+          />
+        </button>
       </div>
       <div className="mt-8 grid gap-6 md:grid-cols-2">
         <div className="rounded-2xl border border-[var(--border)] bg-white/80 p-6">

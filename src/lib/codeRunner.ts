@@ -1,8 +1,4 @@
 import "server-only";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
-import { spawn } from "node:child_process";
 import {
   isAzureBlobUploadConfigured,
   shouldAvoidSasUrls,
@@ -10,9 +6,9 @@ import {
   uploadTextToAzureAndGetSasUrl,
   uploadExecutionInputsToAzure,
 } from "@/lib/blobStorage";
+import { sanitizeInputFileName } from "@/lib/inputFileValidation";
 
 export type ExecutionLanguage = "PYTHON" | "R";
-export type ExecutionBackend = "databricks" | "docker";
 type PackagePolicyMode = "off" | "blocklist" | "allowlist";
 export type ExecutionInputFile = {
   name: string;
@@ -86,22 +82,8 @@ export type ExecutionArtifact = {
   contentBase64?: string;
 };
 
-export type CodeExecutionResult = {
-  stdout: string;
-  stderr: string;
-  exitCode: number | null;
-  timedOut: boolean;
-  durationMs: number;
-  detectedPackages: string[];
-  policyMode: PackagePolicyMode;
-  images: string[];
-  artifacts: ExecutionArtifact[];
-  backend: ExecutionBackend;
-};
-
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_OUTPUT_CHARS = 100_000;
-const DEFAULT_POLL_INTERVAL_MS = 2_000;
 const DEFAULT_DATABRICKS_INPUT_FILE_MAX_BYTES = 256_000;
 const MAX_DATABRICKS_NOTEBOOK_PARAM_BYTES = 9_000;
 const DEFAULT_MAX_ARTIFACT_BYTES = 768_000;
@@ -171,15 +153,10 @@ function unique(values: string[]) {
   return [...new Set(values)];
 }
 
-function sanitizeUploadName(name: string) {
-  const cleaned = basename(name).replace(/[^A-Za-z0-9._-]+/g, "_");
-  return cleaned || "input.dat";
-}
-
 function buildPythonDatabricksInputSetup(inputFiles: ExecutionInputFile[]) {
   if (inputFiles.length === 0) return "";
   const encodedFiles = inputFiles.map((file) => ({
-    name: sanitizeUploadName(file.name),
+    name: sanitizeInputFileName(file.name),
     contentBase64: file.content.toString("base64"),
   }));
   const escaped = JSON.stringify(encodedFiles);
@@ -205,7 +182,7 @@ function buildPythonDatabricksBlobSetup(
   if (inputFiles.length === 0) return "";
   const escaped = JSON.stringify(
     inputFiles.map((file) => ({
-      name: sanitizeUploadName(file.name),
+      name: sanitizeInputFileName(file.name),
       url: file.url,
     })),
   );
@@ -251,7 +228,6 @@ function getDatabricksBlobPathConfig(): DatabricksBlobPathConfig | null {
     clientSecret,
   };
 }
-
 function buildBlobUrlFromName(config: DatabricksBlobPathConfig, blobName: string) {
   return `https://${config.accountName}.blob.core.windows.net/${config.containerName}/${blobName}`;
 }
@@ -286,7 +262,7 @@ function buildPythonDatabricksDirectBlobSetup(
   if (inputFiles.length === 0) return "";
   const escaped = JSON.stringify(
     inputFiles.map((file) => ({
-      name: sanitizeUploadName(file.name),
+      name: sanitizeInputFileName(file.name),
       url: buildBlobUrlFromName(config, file.blobName),
     })),
   );
@@ -310,7 +286,7 @@ function buildRDatabricksInputSetup(inputFiles: ExecutionInputFile[]) {
   const fileListLiteral = `list(${inputFiles
     .map(
       (file) =>
-        `list(name=${JSON.stringify(sanitizeUploadName(file.name))}, contentBase64=${JSON.stringify(file.content.toString("base64"))})`,
+        `list(name=${JSON.stringify(sanitizeInputFileName(file.name))}, contentBase64=${JSON.stringify(file.content.toString("base64"))})`,
     )
     .join(", ")})`;
   return [
@@ -350,7 +326,7 @@ function buildRDatabricksBlobSetup(inputFiles: { name: string; url: string }[]) 
   const fileListLiteral = `list(${inputFiles
     .map(
       (file) =>
-        `list(name=${JSON.stringify(sanitizeUploadName(file.name))}, url=${JSON.stringify(file.url)})`,
+        `list(name=${JSON.stringify(sanitizeInputFileName(file.name))}, url=${JSON.stringify(file.url)})`,
     )
     .join(", ")})`;
   return [
@@ -403,7 +379,7 @@ function buildRDatabricksDirectBlobSetup(
   ].join("\n");
   const pythonPayload = JSON.stringify(
     inputFiles.map((file) => ({
-      name: sanitizeUploadName(file.name),
+      name: sanitizeInputFileName(file.name),
       url: buildBlobUrlFromName(config, file.blobName),
     })),
   );
@@ -551,10 +527,6 @@ function byteLengthUtf8(value: string) {
   return Buffer.byteLength(value, "utf8");
 }
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function normalizeDatabricksBaseUrl(host: string) {
   let value = host.trim();
   value = value.replace(/^https?:\/\/https?:\/\//i, "https://");
@@ -570,27 +542,6 @@ function parsePolicyMode(value: string | undefined): PackagePolicyMode {
     return mode;
   }
   return "blocklist";
-}
-
-function normalizeBackend(value: string | undefined): ExecutionBackend | null {
-  const normalized = (value || "").trim().toLowerCase();
-  if (normalized === "databricks" || normalized === "docker") {
-    return normalized;
-  }
-  return null;
-}
-
-function resolveBackend(
-  language: ExecutionLanguage,
-  requestedBackend?: ExecutionBackend,
-) {
-  if (requestedBackend) return requestedBackend;
-  const envKey =
-    language === "R"
-      ? "CODE_RUNNER_BACKEND_R"
-      : "CODE_RUNNER_BACKEND_PYTHON";
-  const fallback = language === "R" ? "docker" : "databricks";
-  return normalizeBackend(process.env[envKey]) || fallback;
 }
 
 function extractPythonPackages(code: string) {
@@ -1294,7 +1245,7 @@ async function materializeExecutionArtifacts(
   return Promise.all(
     normalized.map(async (artifact) => {
       const uploaded = await uploadBinaryToAzureAndGetSasUrl({
-        fileName: sanitizeUploadName(artifact.name),
+        fileName: sanitizeInputFileName(artifact.name),
         content: Buffer.from(artifact.contentBase64, "base64"),
         contentType: artifact.contentType,
       });
@@ -1475,7 +1426,7 @@ async function buildDatabricksPayloadCode(
   if (inputFiles.length > 0 && isAzureBlobUploadConfigured()) {
     const uploadedFiles = await uploadExecutionInputsToAzure(
       inputFiles.map((file) => ({
-        name: sanitizeUploadName(file.name),
+        name: sanitizeInputFileName(file.name),
         content: file.content,
       })),
     );
@@ -1527,7 +1478,7 @@ async function buildDatabricksPayloadCode(
     );
     if (totalInputBytes > databricksInputFileMaxBytes) {
       throw new Error(
-        `Uploaded input files are too large for Databricks notebook parameters (${totalInputBytes} bytes). Limit is ${databricksInputFileMaxBytes} bytes. Configure Azure Blob Storage for Databricks file handoff, or use the docker runner.`,
+        `Uploaded input files are too large for Databricks notebook parameters (${totalInputBytes} bytes). Limit is ${databricksInputFileMaxBytes} bytes. Configure Azure Blob Storage for Databricks file handoff.`,
       );
     }
     const payload = applyDatabricksInputSetup(basePayloadCode, language, inputFiles);
@@ -1773,237 +1724,4 @@ export async function getDatabricksExecutionStatus(
       backend: "databricks" as const,
     },
   };
-}
-
-async function runCodeInDatabricks(
-  code: string,
-  language: ExecutionLanguage,
-  timeoutMs: number,
-  pollIntervalMs: number,
-  inputFiles: ExecutionInputFile[] = [],
-) {
-  const handle = await startDatabricksExecution(code, language, inputFiles);
-  const startedAt = handle.startedAt;
-
-  while (true) {
-    const status = await fetchDatabricksRunStatus(
-      handle.runId,
-      language,
-      startedAt,
-    );
-    if (status.completed) {
-      return status.result satisfies RawExecutionResult;
-    }
-    if (Date.now() - startedAt > timeoutMs) {
-      return {
-        stdout: status.statusMessage,
-        stderr: "Execution timed out and run was cancelled.",
-        exitCode: 1,
-        timedOut: true,
-        durationMs: Date.now() - startedAt,
-        images: [],
-        artifacts: [],
-      } satisfies RawExecutionResult;
-    }
-    await sleep(pollIntervalMs);
-  }
-}
-
-function getDockerConfig(language: ExecutionLanguage) {
-  const dockerCommand = process.env.CODE_RUNNER_DOCKER_COMMAND || "docker";
-  const image =
-    language === "R"
-      ? process.env.CODE_RUNNER_DOCKER_R_IMAGE || "r-base:4.3.3"
-      : process.env.CODE_RUNNER_DOCKER_PYTHON_IMAGE || "python:3.12-slim";
-  const dockerArgs = splitByComma(process.env.CODE_RUNNER_DOCKER_ARGS);
-  const commandArgs =
-    language === "R" ? ["Rscript", "-"] : ["python", "-u", "-"];
-  return {
-    dockerCommand,
-    args: ["run", "--rm", "-i", ...dockerArgs, image, ...commandArgs],
-  };
-}
-
-async function createExecutionInputWorkspace(files: ExecutionInputFile[]) {
-  const rootDir = await mkdtemp(join(tmpdir(), "sas2py-run-"));
-  const inputDir = join(rootDir, "input");
-  await mkdir(inputDir, { recursive: true });
-
-  const usedNames = new Set<string>();
-  const normalizedFiles: string[] = [];
-
-  for (const file of files) {
-    const baseName = sanitizeUploadName(file.name);
-    let candidate = baseName;
-    let counter = 1;
-    while (usedNames.has(candidate)) {
-      const dotIndex = baseName.lastIndexOf(".");
-      candidate =
-        dotIndex >= 0
-          ? `${baseName.slice(0, dotIndex)}-${counter}${baseName.slice(dotIndex)}`
-          : `${baseName}-${counter}`;
-      counter += 1;
-    }
-    usedNames.add(candidate);
-    normalizedFiles.push(candidate);
-    await writeFile(join(inputDir, candidate), file.content);
-  }
-
-  return {
-    rootDir,
-    hostInputDir: inputDir,
-    containerInputDir: "/workspace/input",
-    fileNames: normalizedFiles,
-  };
-}
-
-async function runCodeInDocker(
-  code: string,
-  language: ExecutionLanguage,
-  timeoutMs: number,
-  inputFiles: ExecutionInputFile[] = [],
-) {
-  const payloadCode =
-    language === "PYTHON"
-      ? buildPythonExecutionEnvelope(code)
-      : buildRExecutionEnvelope(code);
-  const { dockerCommand, args } = getDockerConfig(language);
-  const startedAt = Date.now();
-  const workspace =
-    inputFiles.length > 0 ? await createExecutionInputWorkspace(inputFiles) : null;
-  const finalArgs = workspace
-    ? [
-        "run",
-        "--rm",
-        "-i",
-        "-v",
-        `${workspace.hostInputDir}:${workspace.containerInputDir}:ro`,
-        "-w",
-        workspace.containerInputDir,
-        "-e",
-        `SAS2PY_INPUT_DIR=${workspace.containerInputDir}`,
-        ...args.slice(3),
-      ]
-    : args;
-
-  return new Promise<RawExecutionResult>((resolve, reject) => {
-    const child = spawn(dockerCommand, finalArgs, {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-    let settled = false;
-
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGKILL");
-    }, timeoutMs);
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    child.on("error", (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      void (workspace ? rm(workspace.rootDir, { recursive: true, force: true }) : Promise.resolve());
-      reject(
-        new Error(
-          `Docker code runner failed to start. ${error.message}. Is Docker available on this host?`,
-        ),
-      );
-    });
-
-    child.on("close", (exitCode) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      void (workspace ? rm(workspace.rootDir, { recursive: true, force: true }) : Promise.resolve());
-
-      let images: string[] = [];
-      let artifacts: RawExecutionArtifact[] = [];
-      if (stdout) {
-        const parsed = parseExecutionEnvelope(stdout);
-        if (parsed) {
-          stdout = parsed.stdout;
-          stderr = `${stderr}${stderr && parsed.stderr ? "\n" : ""}${parsed.stderr}`;
-          images = parsed.images;
-          artifacts = parsed.artifacts;
-        }
-      }
-
-      if (timedOut && !stderr) {
-        stderr = "Execution timed out and process was terminated.";
-      }
-
-      resolve({
-        stdout,
-        stderr,
-        exitCode,
-        timedOut,
-        durationMs: Date.now() - startedAt,
-        images,
-        artifacts,
-      });
-    });
-
-    child.stdin.write(payloadCode);
-    child.stdin.end();
-  });
-}
-
-export async function runCodeInContainer(
-  code: string,
-  language: ExecutionLanguage,
-  requestedBackend?: ExecutionBackend,
-  inputFiles: ExecutionInputFile[] = [],
-) {
-  if (!code.trim()) {
-    throw new Error("Code is required.");
-  }
-
-  const timeoutMs = parsePositiveInt(
-    process.env.CODE_RUNNER_TIMEOUT_MS,
-    DEFAULT_TIMEOUT_MS,
-  );
-  const maxOutputChars = parsePositiveInt(
-    process.env.CODE_RUNNER_MAX_OUTPUT_CHARS,
-    DEFAULT_MAX_OUTPUT_CHARS,
-  );
-  const pollIntervalMs = parsePositiveInt(
-    process.env.CODE_RUNNER_DATABRICKS_POLL_INTERVAL_MS,
-    DEFAULT_POLL_INTERVAL_MS,
-  );
-  const backend = resolveBackend(language, requestedBackend);
-  const { mode, detectedPackages } = validatePackagePolicy(code, language);
-
-  const rawResult =
-    backend === "databricks"
-      ? await runCodeInDatabricks(
-          code,
-          language,
-          timeoutMs,
-          pollIntervalMs,
-          inputFiles,
-        )
-      : await runCodeInDocker(code, language, timeoutMs, inputFiles);
-  const artifacts = await materializeExecutionArtifacts(rawResult.artifacts);
-
-  return {
-    stdout: truncateOutput(rawResult.stdout, maxOutputChars),
-    stderr: truncateOutput(rawResult.stderr, maxOutputChars),
-    exitCode: rawResult.exitCode,
-    timedOut: rawResult.timedOut,
-    durationMs: rawResult.durationMs,
-    detectedPackages,
-    policyMode: mode,
-    images: rawResult.images,
-    artifacts,
-    backend,
-  } satisfies CodeExecutionResult;
 }

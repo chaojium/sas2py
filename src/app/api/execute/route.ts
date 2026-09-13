@@ -1,15 +1,17 @@
 import { NextResponse } from "next/server";
 import {
   getDatabricksExecutionStatus,
-  runCodeInContainer,
   startDatabricksExecution,
-  type ExecutionBackend,
   type ExecutionInputFile,
   type ExecutionLanguage,
 } from "@/lib/codeRunner";
 import { execute, table } from "@/lib/databricks";
 import { getAuthUser } from "@/lib/firebase/server";
-import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import {
+  formatInputFileValidationError,
+  validateInputFileNames,
+} from "@/lib/inputFileValidation";
+import { createHmac, timingSafeEqual } from "node:crypto";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -79,6 +81,14 @@ async function ensureCodeEntryOwnership(codeEntryId: string, userId: string) {
     [codeEntryId, userId],
   );
   return Boolean(entryRows[0]);
+}
+
+async function getOwnedSasCode(codeEntryId: string, userId: string) {
+  const rows = await execute<Record<string, unknown>>(
+    `SELECT sas_code FROM ${table("code_entries")} WHERE id = ? AND user_id = ? LIMIT 1`,
+    [codeEntryId, userId],
+  );
+  return rows[0] ? String(rows[0].sas_code || "") : null;
 }
 
 async function persistExecutionResult(params: {
@@ -197,7 +207,6 @@ export async function POST(request: Request) {
   const { code, rawLanguage, rawBackend, codeEntryId, inputFiles } =
     await parseExecutionRequest(request);
   const language: ExecutionLanguage = rawLanguage === "R" ? "R" : "PYTHON";
-  const backend = rawBackend ? (rawBackend as ExecutionBackend) : undefined;
 
   if (!code.trim()) {
     return NextResponse.json({ error: "Code is required." }, { status: 400 });
@@ -208,61 +217,52 @@ export async function POST(request: Request) {
       { status: 400 },
     );
   }
-  if (rawBackend && rawBackend !== "databricks" && rawBackend !== "docker") {
+  if (rawBackend && rawBackend !== "databricks") {
     return NextResponse.json(
-      { error: "Backend must be databricks or docker." },
+      { error: "Backend must be databricks." },
       { status: 400 },
     );
   }
 
   try {
-    if (codeEntryId && !(await ensureCodeEntryOwnership(codeEntryId, user.appUserId))) {
-      return NextResponse.json(
-        { error: "Code entry not found." },
-        { status: 404 },
+    if (codeEntryId) {
+      const sasCode = await getOwnedSasCode(codeEntryId, user.appUserId);
+      if (sasCode === null) {
+        return NextResponse.json(
+          { error: "Code entry not found." },
+          { status: 404 },
+        );
+      }
+
+      const inputFileValidation = validateInputFileNames(
+        sasCode,
+        inputFiles.map((file) => file.name),
       );
+      if (inputFileValidation.missingFiles.length > 0) {
+        return NextResponse.json(
+          {
+            error: formatInputFileValidationError(inputFileValidation),
+            code: "input_file_mismatch",
+            inputFileValidation,
+          },
+          { status: 422 },
+        );
+      }
     }
 
-    if (backend === "databricks" || (!backend && language === "PYTHON")) {
-      const handle = await startDatabricksExecution(code, language, inputFiles);
-      return NextResponse.json({
-        pending: true,
-        backend: "databricks",
-        token: encodeExecutionToken({
-          runId: handle.runId,
-          language: handle.language,
-          codeEntryId,
-          startedAt: handle.startedAt,
-          detectedPackages: handle.detectedPackages,
-          policyMode: handle.policyMode,
-        }),
-      });
-    }
-
-    const result = await runCodeInContainer(code, language, backend, inputFiles);
-    const runId = randomUUID();
-    await execute(
-      `INSERT INTO ${table(
-        "code_runs",
-      )} (id, code_entry_id, user_id, language, stdout, stderr, exit_code, timed_out, duration_ms, detected_packages, policy_mode, artifacts_json, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp())`,
-      [
-        runId,
-        codeEntryId || null,
-        user.appUserId,
-        language,
-        result.stdout,
-        result.stderr,
-        result.exitCode,
-        result.timedOut,
-        result.durationMs,
-        result.detectedPackages.join(","),
-        result.policyMode,
-        JSON.stringify(result.artifacts || []),
-      ],
-    );
-
-    return NextResponse.json({ pending: false, result });
+    const handle = await startDatabricksExecution(code, language, inputFiles);
+    return NextResponse.json({
+      pending: true,
+      backend: "databricks",
+      token: encodeExecutionToken({
+        runId: handle.runId,
+        language: handle.language,
+        codeEntryId,
+        startedAt: handle.startedAt,
+        detectedPackages: handle.detectedPackages,
+        policyMode: handle.policyMode,
+      }),
+    });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Code execution failed.";

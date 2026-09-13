@@ -2,7 +2,7 @@
 
 ## Overview
 
-SAS2Py Studio is a Next.js application with a protected browser UI, server-side API routes, Azure OpenAI conversion/refinement services, Databricks-backed operational storage, PostgreSQL/Prisma authentication storage, and configurable code execution backends.
+SAS2Py Studio is a Next.js application with a protected browser UI, server-side API routes, Azure OpenAI conversion/refinement services, Databricks-backed operational storage, PostgreSQL/Prisma authentication storage, and Databricks-backed code execution.
 
 ## Technology Stack
 
@@ -14,7 +14,7 @@ SAS2Py Studio is a Next.js application with a protected browser UI, server-side 
 - Prisma with PostgreSQL for user/auth-related data.
 - Databricks SQL for conversion, review, run, enhancement, project, and conversation data.
 - Azure OpenAI for conversion, analysis, refinement, and assistant conversations.
-- Databricks Jobs and Docker for code execution.
+- Databricks Jobs for code execution.
 - Azure Blob Storage for large execution payloads, uploaded input files, and artifacts.
 
 ## High-Level Flow
@@ -25,7 +25,7 @@ Browser UI
     -> Auth/user ownership checks
     -> Azure OpenAI for conversion/refinement/chat
     -> Databricks SQL for app records
-    -> Databricks Jobs or Docker for code execution
+    -> Databricks Jobs for code execution
     -> Azure Blob Storage for file handoff/artifacts
 ```
 
@@ -47,7 +47,7 @@ The frontend calls backend APIs through authenticated fetch helpers and does not
 Primary API routes live under `src/app/api`.
 
 - `conversions/route.ts`: conversion list, generation, refinement, manual code update, project assignment, deletion.
-- `execute/route.ts`: synchronous Docker execution or asynchronous Databricks execution/polling.
+- `execute/route.ts`: asynchronous Databricks execution and polling.
 - `conversations/route.ts`: conversion-specific assistant chat.
 - `reviews/route.ts`: review creation.
 - `sas-analysis/route.ts`: validation planning for SAS code.
@@ -106,10 +106,9 @@ The Databricks helper lives in `src/lib/databricks.ts`.
 
 Execution logic lives in `src/lib/codeRunner.ts`.
 
-Supported backends:
+Supported backend:
 
 - Databricks Jobs.
-- Docker containers.
 
 Execution features:
 
@@ -146,7 +145,6 @@ Important groups:
 - Azure OpenAI credentials, endpoint, model, API version, timeout, and optional CA certificate.
 - Databricks SQL hostname, HTTP path, token, catalog, and schema.
 - Databricks Jobs IDs, task keys, per-language host/token overrides.
-- Docker runner image and runtime arguments.
 - Azure Storage account/container/prefix and access mode.
 - Auth database URL, NextAuth secret, and app URL.
 - Package policy and execution limits.
@@ -167,7 +165,6 @@ Production options include:
 - Docker image using the root `Dockerfile`.
 - Azure Web App or similar Node hosting.
 - External Databricks workspace for SQL and Jobs.
-- Optional separate Docker runner infrastructure for controlled R/Python execution.
 
 ## Security Considerations
 
@@ -182,7 +179,7 @@ Production options include:
 
 - Add more SAS procedure prompt modules in `src/lib/codex.ts`.
 - Add more target languages.
-- Add more execution backends.
+- Add more execution capabilities within Databricks.
 - Add richer validation reports comparing SAS and generated outputs.
 - Add role-based access control for shared projects.
 - Add automated regression tests using the `examples` folder.

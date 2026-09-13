@@ -142,20 +142,12 @@ Notes:
 
 ## Code Runner
 
-After conversion, users can run generated code through `POST /api/execute` with per-language backends:
-
-- Python: Databricks Jobs
-- R: Docker
+After conversion, users can run generated Python or R code through `POST /api/execute` using Databricks Jobs.
 
 Set these optional `.env` variables to tune the runner:
 
-- `CODE_RUNNER_BACKEND_R` (`docker` or `databricks`; default: `docker`)
-- `CODE_RUNNER_DOCKER_COMMAND` (default: `docker`)
-- `CODE_RUNNER_DOCKER_PYTHON_IMAGE` (default: `python:3.12-slim`)
-- `CODE_RUNNER_DOCKER_R_IMAGE` (default: `r-base:4.3.3`)
-- `CODE_RUNNER_DOCKER_ARGS` (comma-separated docker run args, e.g. `--network=none,--cpus=2`)
-- `CODE_RUNNER_DATABRICKS_PYTHON_JOB_ID` (required when Python backend is `databricks`)
-- `CODE_RUNNER_DATABRICKS_R_JOB_ID` (required when R backend is `databricks`)
+- `CODE_RUNNER_DATABRICKS_PYTHON_JOB_ID` (required for Python execution)
+- `CODE_RUNNER_DATABRICKS_R_JOB_ID` (required for R execution)
 - `CODE_RUNNER_DATABRICKS_PYTHON_TASK_KEY` (optional, recommended if Python job has multiple tasks)
 - `CODE_RUNNER_DATABRICKS_R_TASK_KEY` (optional, recommended if R job has multiple tasks)
 - `CODE_RUNNER_DATABRICKS_PYTHON_HOST` (optional; overrides shared Databricks host for Python job runs)
@@ -168,7 +160,6 @@ Set these optional `.env` variables to tune the runner:
 - `AZURE_STORAGE_CONTAINER` (default: `sas2py-inputs`)
 - `AZURE_STORAGE_BLOB_PREFIX` (default: `execution-inputs`)
 - `CODE_RUNNER_TIMEOUT_MS` (default: `120000`)
-- `CODE_RUNNER_DATABRICKS_POLL_INTERVAL_MS` (default: `2000`)
 - `CODE_RUNNER_DATABRICKS_INPUT_FILE_MAX_BYTES` (default: `256000`; used only when Azure Blob handoff is not configured)
 - `CODE_RUNNER_MAX_OUTPUT_CHARS` (default: `100000`)
 - `CODE_RUNNER_PACKAGE_POLICY` (`off`, `blocklist`, `allowlist`; default: `blocklist`)
@@ -193,7 +184,3 @@ Azure Web App Blob auth:
 - If a job has multiple tasks, set the corresponding `..._TASK_KEY` so output retrieval targets the correct task.
 - If Python and R run in different Databricks workspaces, set the corresponding `..._HOST` and `..._TOKEN` values for each language.
 - For uploaded execution input files with Databricks, configure Azure Blob Storage in the app. The backend uploads files to Blob, injects short-lived SAS URLs into the generated `code` payload, and the payload downloads files into `SAS2PY_INPUT_DIR` before the user code runs.
-
-ECPaaS note:
-
-- You can host a dedicated Docker runner image on ECPaaS and point Docker runtime to that image via `CODE_RUNNER_DOCKER_PYTHON_IMAGE` and `CODE_RUNNER_DOCKER_R_IMAGE`.

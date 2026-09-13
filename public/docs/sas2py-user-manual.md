@@ -1,275 +1,190 @@
 # SAS2Py User Manual
 
-This manual is based on the current SAS2Py application behavior in the codebase as of May 4, 2026.
+This manual describes the SAS2Py application behavior available as of September 11, 2026.
 
 ## 1. Purpose
 
-SAS2Py converts SAS programs into Python or R, stores the original and converted code together, and keeps execution and review history for each saved conversion.
+SAS2Py converts SAS and SAS-callable SUDAAN programs into R or Python. It keeps the original source and generated code together and stores enhancement, execution, and review history for each saved conversion.
 
-The current application includes these user-facing areas:
+SAS2Py assists code modernization and review. Generated statistical code still requires subject-matter review, especially when an exact SAS or SUDAAN method is not available in the target language.
+
+The application includes:
 
 - Dashboard
 - Studio
-- History
+- History and projects
 - Documentation
 - Settings
 
 ## 2. Access and Sign-In
 
-Most application features require authentication.
+Authentication is required for the main workspace. The current sign-in flow uses internal email and password accounts stored by the application.
 
-Supported sign-in methods:
-
-- Email and password
-- Internal account creation and sign-in
-
-Authentication is required for:
-
-- Creating and saving conversions
-- Viewing dashboard counts
-- Running code
-- Saving reviews
-- Managing projects and history
-- Updating profile settings
+Signing in provides access to saved conversions, execution records, reviews, project organization, dashboard metrics, and profile settings.
 
 ## 3. Dashboard
 
-The Dashboard displays summary metrics for the signed-in user:
+The Dashboard shows summary counts for the signed-in user, including stored conversions and reviews.
 
-- Total stored conversions
-- Total reviews
+## 4. Studio Conversion Workflow
 
-This page is intended as a quick status view of user activity.
+The Studio is the main workspace.
 
-## 4. Studio
+### 4.1 Start a conversion
 
-The Studio is the primary working area for SAS conversion.
+1. Enter a conversion name.
+2. Select an output language. R is the default; Python is also available.
+3. Select a source type, or keep `Auto-detect / Not sure`.
+4. Optionally enter translation guidance or a reference URL.
+5. Paste SAS code or upload a `.sas` file.
+6. Attach any data files needed for validation or execution.
+7. Select conversion options and click `Convert`.
 
-### 4.1 Create a conversion
+A conversion name and SAS source code are required. Source-file uploads must use the `.sas` extension.
 
-To create a conversion:
+When a `.sas` file is uploaded, its content populates the source editor. If the conversion name is blank, the source filename becomes the initial conversion name.
 
-1. Sign in.
-2. Enter a conversion name.
-3. Choose an output language: Python or R.
-4. Paste SAS code into the editor, or upload a `.sas` file.
-5. Start the conversion.
+### 4.2 Source types
 
-Important current rules:
+- `Auto-detect / Not sure`: SAS2Py inspects the program and selects the applicable translation route.
+- `SAS`: regular SAS code such as DATA steps, PROC SQL, and SAS survey procedures.
+- `SAS-callable SUDAAN`: SUDAAN procedures and statements invoked from SAS, such as PROC DESCRIPT, CROSSTAB, RLOGIST, MULTILOG, NEST, SUBPOPN, and LEVELS.
+- `Mixed SAS + SUDAAN`: a program that combines substantial SAS data preparation or reporting with SUDAAN analysis in the same source file.
 
-- A conversion name is required.
-- SAS code is required.
-- Uploaded source files must be `.sas` files.
+For most users, auto-detection is the safest starting point. Select a route manually when the source is known and auto-detection needs correction.
 
-### 4.2 Uploading a SAS file
+### 4.3 Additional guidance and reference URLs
 
-When a `.sas` file is uploaded:
+Additional guidance can specify methodological requirements, constraints, expected output columns, or preferred target-language approaches.
 
-- Its contents are loaded into the SAS editor.
-- If the conversion name field is blank, the file name becomes the default conversion name.
+For an HTTP or HTTPS reference URL, SAS2Py attempts to fetch readable text from the page and supplies up to 8,000 characters to the model as untrusted methodological context. Fetching has a 15-second limit. Local/private-network addresses and unsupported non-text content are not read. A URL is supporting context; the SAS source remains the primary specification.
 
-### 4.3 Conversion output
+### 4.4 Saved-result reuse and Force regenerate
 
-After a successful conversion:
+When `Force regenerate` is not selected, SAS2Py reuses the latest saved translation when all of these values match a previous conversion:
 
-- The generated Python or R code appears in the output panel.
-- The conversion is saved as a history entry.
-- The original SAS code and converted code remain linked together.
+- signed-in user
+- SAS source code
+- output language
+- additional guidance
+- reference URL
+
+Select `Force regenerate instead of reusing the latest saved translation` when a fresh model response is required. Auto-repair runs always create a new conversion rather than reusing a saved result.
+
+### 4.5 Conversion output and built-in checks
+
+After a successful conversion, the generated R or Python code appears in the output panel and is saved with the original source.
+
+Before ordinary generated code is accepted, SAS2Py performs route-aware structural checks for known translation risks. These checks can detect patterns such as missing survey design variables, incorrect SUDAAN count logic, placeholder output values, unsupported package assumptions, and requested output artifacts that do not match the SAS program.
+
+For the supported SUDAAN percentile pattern, the translation instructions and checks distinguish:
+
+- `NSUM`: unweighted eligible records in the current subpopulation
+- `N_ACT`: copied from `NSUM`
+- `N`: separately calculated effective sample size
+
+The checks do not run SAS and do not compare against an expected SAS result unless a reviewer independently provides one. The four repository examples are internal regression tests for SAS2Py development; they are not translated with a user's request and are not part of the user workflow.
 
 ## 5. SAS Analysis
 
-The Studio can generate an analysis of the SAS source code.
+`Analyze SAS` generates:
 
-The current analysis returns:
+- a plain-language interpretation of the source
+- the expected business or data output
+- three to six review checks
 
-- `interpretation`: a concise explanation of what the SAS program is doing
-- `expectedOutput`: the expected output in business or data terms
-- `validationChecks`: 3 to 6 checks that can be used to validate the conversion
+This analysis supports review but is not an execution result or proof of statistical equivalence.
 
-This feature is useful when reviewing whether the converted output still matches the SAS program's intent.
+## 6. Input Files
 
-## 6. Editing and Enhancing Converted Code
+Attach input data in the source section before conversion when auto-repair will run, or before manual execution. Uploaded files are exposed to Databricks through `SAS2PY_INPUT_DIR`. Generated code should resolve source data from this directory rather than reproducing local Windows paths from SAS `LIBNAME` statements.
 
-After a conversion is created, users can continue working with the generated code.
+When auto-repair is selected, SAS2Py checks filenames referenced by the SAS source before starting. If required filenames are missing or differ from the uploaded names, the app asks the user to upload the correct files. Filename matching is exact, including the extension and letter case.
 
-### 6.1 Manual editing
+Input attachments remain available when switching between R and Python. `View latest` also retains current attachments when the selected history entry has the same SAS source. Selecting or entering a different SAS source clears them.
 
-Users can edit the generated code directly in the Studio and save the changes back to the stored conversion.
+Uploaded file contents are kept only in the current browser session and execution request. They are not stored in conversion history and cannot be restored after a page refresh or a later sign-in.
 
-### 6.2 AI enhancement
+## 7. Automatic Run and Repair
 
-Users can submit a refinement instruction, such as:
+Select `Run generated code and auto-repair runtime errors before saving` to have SAS2Py validate the generated target-language code in Databricks before the conversion is finalized.
 
-- optimize with vectorized pandas
-- add typing
-- improve performance
-- clean up style
+The workflow:
 
-The application sends the current SAS source, the current converted code, and the enhancement instruction to the refinement service, then saves the updated output.
+1. Generates R or Python code.
+2. Applies static checks for known runtime and translation risks.
+3. Runs the generated code with the attached input files.
+4. If the run fails, sends the error and current code back for a limited repair attempt.
+5. Saves the latest code and available execution output, whether the final run passes or still needs review.
 
-### 6.3 Downloading the result
+Attach the associated input files when the SAS source reads data. Auto-repair validates target-language execution; it does not execute the original SAS/SUDAAN program and usually has no known expected SAS output to compare against.
 
-Users can download the current converted file:
+Leave auto-repair off when only a translation is needed or the required data cannot be uploaded. The code can still be run manually later.
 
-- Python output downloads as `.py`
-- R output downloads as `.R`
+## 8. Running Generated Code
 
-## 7. Running Converted Code
+R and Python code execute through Databricks Jobs. Execution results can include:
 
-The Studio supports execution of converted code.
+- `Run Output`
+- `Errors / Warnings`
+- exit code, duration, and timeout status
+- detected packages and package-policy status
+- plot previews
+- downloadable output files
 
-Execution results can include:
+Users can copy, download, or paste run messages into a follow-up prompt.
 
-- `stdout`
-- `stderr`
-- exit code
-- timeout status
-- duration in milliseconds
-- detected packages
-- policy mode
-- generated plot images
+If the SAS program requests one Excel workbook and no CSV files, the generated R and Python code should produce one workbook with the required sheets instead of exposing intermediate CSV files. Generated plots and other explicitly requested files are captured as downloadable outputs.
 
-### 7.1 Input files
+Depending on deployment settings, package allowlists or blocklists can reject a run. Large uploaded files may require Azure Blob Storage handoff when they exceed Databricks notebook-parameter limits.
 
-Users can attach one or more input files before execution.
+## 9. Editing and Applying Enhancements
 
-The execution environment exposes uploaded files through `SAS2PY_INPUT_DIR`.
+Users can edit generated code directly and save it to the current conversion.
 
-Current runtime paths:
+`Apply enhancement` sends the current SAS source, current generated code, and the user's instruction to the refinement service. It is intended for concrete requests such as changing a plot color, improving performance, or adjusting output formatting. The app requires a real code change and retries once if the first response is unchanged; an unchanged result is reported as an error instead of being saved as a successful enhancement.
 
-- Docker runs: `/workspace/input`
-- Databricks runs: temporary runtime directory created by the runner payload
+Enhancements can be applied to an entry opened with `View latest`; a new conversion is not required. The current file can be downloaded as `.R` or `.py`.
 
-### 7.2 Current backend behavior
+## 10. Reviews
 
-Based on the current code:
+Each saved conversion can receive review notes. Comments are required. A summary is optional, and an optional rating must be from 1 to 5.
 
-- Python execution defaults to Databricks unless another backend is explicitly requested or configured
-- R execution defaults to Docker unless the deployment is configured differently
+## 11. History and Projects
 
-### 7.3 Plots
+History supports search by conversion name, project name, SAS source, or generated code. `View latest` opens the preferred language version for a grouped source when available.
 
-If the executed code generates plots, SAS2Py captures them and displays them in the execution results panel.
+Users can create projects, move conversions between projects, and return entries to the unassigned group. Deleting a project unassigns its conversions; it does not delete them. Deleting an individual conversion removes the entry and its stored reviews and execution records.
 
-### 7.4 Package policy
+Input file contents are not part of history. Reattach them before a future run or auto-repair request.
 
-Before execution, the application inspects imported packages.
+## 12. Settings
 
-Depending on deployment configuration, execution may be:
+Settings supports profile maintenance, including viewing the account email and updating the display name.
 
-- allowed without restrictions
-- blocked if a package is on the blocklist
-- blocked if a package is not on the allowlist
+The Appearance section includes a dark-mode switch. The selected light or dark theme applies throughout SAS2Py and is saved in the browser so it remains active after navigation and page refreshes.
 
-If execution is rejected for package policy reasons, the user must modify the code or ask an administrator to change the execution policy.
+## 13. Common Validation and Error Cases
 
-### 7.5 File-size limits for Databricks execution
+- Missing conversion name or SAS source: provide both before converting.
+- Incorrect input filenames: upload the exact files referenced by the source before auto-repair.
+- Reference page cannot be read: continue without it or provide an accessible HTTP/HTTPS text page.
+- Model timeout or rate limit: retry after the service recovers; use saved-result reuse when an identical conversion already exists.
+- Package-policy rejection: revise package use or contact the deployment administrator.
+- Databricks timeout or runtime error: review `Errors / Warnings`, correct inputs or code, and run again.
+- Enhancement leaves code unchanged: make the instruction concrete and retry; the unchanged version is not recorded as a successful enhancement.
 
-When Databricks is used with uploaded execution files, large files may exceed notebook parameter limits.
+## 14. Recommended Review Workflow
 
-If Azure Blob Storage handoff is not configured and the total uploaded file size exceeds the configured threshold, execution will fail with a size-limit error.
+1. Confirm the source type and target language.
+2. Convert the SAS source, attaching required data if auto-repair is used.
+3. Review the SAS interpretation and generated code.
+4. Verify survey strata, PSU, weights, subpopulation logic, formats, reference levels, and output schema.
+5. Run the target code and inspect `Run Output`, `Errors / Warnings`, plots, and downloadable files.
+6. Compare important values with trusted SAS/SUDAAN results when those results are available.
+7. Apply enhancements or manual edits, then rerun affected code.
+8. Record review notes and organize the conversion in History.
 
-## 8. Reviews
+## 15. Administrator Notes
 
-Each saved conversion can receive review notes.
-
-Current review fields:
-
-- Summary: optional
-- Comments: required
-- Rating: optional, must be between 1 and 5
-
-Reviews are stored with the conversion and appear in the Studio view for that entry.
-
-## 9. History and Projects
-
-The History page is used to manage saved conversions and organize them into projects.
-
-### 9.1 Search
-
-Users can search conversions by:
-
-- conversion name
-- project name
-- SAS code
-- converted code
-
-### 9.2 Projects
-
-Users can create projects with:
-
-- name
-- optional description
-
-Conversions can be:
-
-- assigned to a project
-- moved between projects
-- returned to the unassigned group
-
-### 9.3 Deleting a project
-
-Deleting a project does not delete its conversions.
-
-Current behavior:
-
-- the project is removed
-- its conversions are unassigned
-
-### 9.4 Deleting a conversion
-
-Deleting a conversion removes:
-
-- the conversion entry
-- its saved reviews
-- its saved execution records
-
-## 10. Settings
-
-The Settings page currently supports profile maintenance.
-
-Users can:
-
-- view their current display name
-- view their email address
-- update their display name
-
-## 11. Current Validation and Error Rules
-
-The current implementation enforces these user-visible rules:
-
-- Conversion name is required before conversion.
-- SAS code is required before conversion.
-- Review comments are required before saving a review.
-- Ratings must be between 1 and 5.
-- Code must exist before execution can start.
-- Source upload must be a `.sas` file.
-- Users can only modify or delete conversions and projects they own.
-
-## 12. Recommended User Workflow
-
-For typical use:
-
-1. Sign in.
-2. Create a named conversion in Studio.
-3. Paste SAS code or upload a `.sas` file.
-4. Convert to Python or R.
-5. Generate SAS analysis and compare the interpretation with the output.
-6. Edit or enhance the converted code as needed.
-7. Run the converted code with any required input files.
-8. Review stdout, stderr, plots, and package detection.
-9. Save review notes.
-10. Organize the conversion into a project from the History page.
-
-## 13. Notes for Administrators and Power Users
-
-Some behavior depends on deployment configuration rather than a visible user setting, including:
-
-- OpenAI model selection
-- execution backend configuration
-- Databricks runner setup
-- Docker runner setup
-- package allowlist or blocklist policy
-- Azure Blob Storage handoff for large Databricks input files
-
-If users encounter execution, authentication, or storage-related errors, these settings should be checked in the deployment environment.
+Deployment behavior depends on Azure OpenAI model access and timeout settings, Databricks Jobs configuration, package policy, storage handoff for large files, and database access. These settings should be checked when failures affect multiple users or differ between local and deployed environments.
