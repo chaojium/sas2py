@@ -94,7 +94,11 @@ export async function execute<T = Record<string, unknown>>(
     throw normalizeDatabricksError(error, "Databricks query failed");
   } finally {
     if (session) {
-      await session.close();
+      try {
+        await session.close();
+      } catch (error) {
+        console.warn("Databricks session cleanup failed:", error);
+      }
     }
   }
 }

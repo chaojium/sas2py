@@ -79,7 +79,7 @@ export default function HistoryClient() {
 
   useEffect(() => {
     if (!isAuthed) return;
-    void Promise.all([fetchEntries(false), fetchProjects()]);
+    void Promise.all([fetchEntries(true), fetchProjects()]);
   }, [fetchEntries, fetchProjects, isAuthed]);
 
   const filteredEntries = useMemo(() => {

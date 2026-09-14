@@ -1,7 +1,10 @@
 "use client";
 
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
+import {
+  oneDark,
+  oneLight,
+} from "react-syntax-highlighter/dist/esm/styles/prism";
 
 const Highlighter = SyntaxHighlighter as typeof SyntaxHighlighter & ((props: {
   language: string;
@@ -21,6 +24,7 @@ type CodeBlockProps = {
   wrapLongLines?: boolean;
   showLineNumbers?: boolean;
   highlightedLines?: number[];
+  theme?: "light" | "dark";
 };
 
 export default function CodeBlock({
@@ -30,24 +34,28 @@ export default function CodeBlock({
   wrapLongLines = false,
   showLineNumbers = false,
   highlightedLines = [],
+  theme = "dark",
 }: CodeBlockProps) {
   const highlightedLineSet = new Set(highlightedLines);
+  const isLight = theme === "light";
 
   return (
     <div
-      className={`w-full min-w-0 rounded-xl border border-[var(--border)] bg-[#141312] ${
+      className={`w-full min-w-0 rounded-xl border border-[var(--border)] ${
+        isLight ? "bg-[#fafafa]" : "bg-[#141312]"
+      } ${
         wrapLongLines ? "overflow-x-hidden overflow-y-auto" : "overflow-auto"
       }`}
       style={{ maxHeight }}
     >
       <Highlighter
         language={language}
-        style={oneDark}
+        style={isLight ? oneLight : oneDark}
         showLineNumbers={showLineNumbers}
         lineNumberStyle={{
           minWidth: "2.5em",
           paddingRight: "1em",
-          color: "rgba(255,255,255,0.38)",
+          color: isLight ? "rgba(31,41,55,0.48)" : "rgba(255,255,255,0.38)",
           userSelect: "none",
         }}
         lineProps={(lineNumber) =>

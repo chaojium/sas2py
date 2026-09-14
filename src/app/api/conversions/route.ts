@@ -13,7 +13,12 @@ import {
   getGeneratedConversionValidationIssues,
   normalizeGeneratedRCode,
 } from "@/lib/codex";
-import { analyzeSasSource, type SourceRouteSelection } from "@/lib/sasPipeline";
+import {
+  analyzeSasSource,
+  reviewGeneratedConversion,
+  type SasSourceAnalysis,
+  type SourceRouteSelection,
+} from "@/lib/sasPipeline";
 import {
   formatInputFileValidationError,
   sanitizeInputFileName,
@@ -67,6 +72,11 @@ type AutoValidationResult = {
   passed: boolean;
   error?: string;
 };
+
+const AUTO_REPAIR_ROUTE_FINDINGS = new Set([
+  "missing_excel_output",
+  "unexpected_csv_outputs",
+]);
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -157,6 +167,33 @@ function buildStaticValidationRepairInstruction(
   ].join("\n");
 }
 
+function getAutoRepairValidationIssues(params: {
+  sasCode: string;
+  code: string;
+  language: ExecutionLanguage;
+  sourceAnalysis: SasSourceAnalysis;
+}) {
+  const generatedCodeIssues = getGeneratedConversionValidationIssues(
+    params.code,
+    params.language,
+  );
+  const pipeline = reviewGeneratedConversion({
+    sasCode: params.sasCode,
+    generatedCode: params.code,
+    language: params.language,
+    analysis: params.sourceAnalysis,
+  });
+  const routeIssues = pipeline.review.findings
+    .filter(
+      (finding) =>
+        finding.severity === "error" ||
+        AUTO_REPAIR_ROUTE_FINDINGS.has(finding.code),
+    )
+    .map((finding) => finding.message);
+
+  return Array.from(new Set([...generatedCodeIssues, ...routeIssues]));
+}
+
 async function runCodeToCompletion(
   code: string,
   language: ExecutionLanguage,
@@ -200,6 +237,7 @@ async function runAutoValidation(params: {
   additionalGuidance: string;
   referenceUrl: string;
   sourceRouteSelection: SourceRouteSelection;
+  sourceAnalysis: SasSourceAnalysis;
   inputFiles: ExecutionInputFile[];
   deadlineMs?: number;
 }): Promise<AutoValidationResult> {
@@ -209,10 +247,12 @@ async function runAutoValidation(params: {
   const maxAttempts = parseAutoValidationAttempts();
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const staticIssues = getGeneratedConversionValidationIssues(
-      currentCode,
-      params.language,
-    );
+    const staticIssues = getAutoRepairValidationIssues({
+      sasCode: params.sasCode,
+      code: currentCode,
+      language: params.language,
+      sourceAnalysis: params.sourceAnalysis,
+    });
     if (staticIssues.length > 0) {
       if (!hasValidationTimeRemaining(params.deadlineMs, 60_000)) {
         return {
@@ -253,10 +293,12 @@ async function runAutoValidation(params: {
       }
 
       if (attempt === maxAttempts) {
-        const remainingIssues = getGeneratedConversionValidationIssues(
-          currentCode,
-          params.language,
-        );
+        const remainingIssues = getAutoRepairValidationIssues({
+          sasCode: params.sasCode,
+          code: currentCode,
+          language: params.language,
+          sourceAnalysis: params.sourceAnalysis,
+        });
         if (remainingIssues.length > 0) {
           return {
             code: currentCode,
@@ -441,6 +483,7 @@ async function parseConversionRequest(request: Request) {
           ? String(formData.get("referenceUrl")).trim()
           : "",
       inputFiles,
+      inputFileNames: inputFiles.map((file) => sanitizeInputFileName(file.name)),
     };
   }
 
@@ -460,6 +503,11 @@ async function parseConversionRequest(request: Request) {
     referenceUrl:
       typeof body?.referenceUrl === "string" ? body.referenceUrl.trim() : "",
     inputFiles: [] as ExecutionInputFile[],
+    inputFileNames: Array.isArray(body?.inputFileNames)
+      ? body.inputFileNames
+          .filter((value: unknown): value is string => typeof value === "string")
+          .map((value: string) => sanitizeInputFileName(value))
+      : [],
   };
 }
 
@@ -643,6 +691,7 @@ export async function POST(request: Request) {
     additionalGuidance,
     referenceUrl,
     inputFiles,
+    inputFileNames,
   } = await parseConversionRequest(request);
   const language = rawLanguage.toLowerCase() === "r" ? "R" : "PYTHON";
   if (!sasCode) {
@@ -759,18 +808,14 @@ export async function POST(request: Request) {
         ? await convertSasToRWithPipeline(sasCode, {
             additionalGuidance,
             referenceUrl,
-            inputFileNames: inputFiles.map((file) =>
-              sanitizeInputFileName(file.name),
-            ),
+            inputFileNames,
             sourceRouteSelection,
             skipValidation: autoValidate,
           })
         : await convertSasToPythonWithPipeline(sasCode, {
             additionalGuidance,
             referenceUrl,
-            inputFileNames: inputFiles.map((file) =>
-              sanitizeInputFileName(file.name),
-            ),
+            inputFileNames,
             sourceRouteSelection,
             skipValidation: autoValidate,
           });
@@ -782,11 +827,20 @@ export async function POST(request: Request) {
           additionalGuidance,
           referenceUrl,
           sourceRouteSelection,
+          sourceAnalysis: conversionResult.pipeline.sourceAnalysis,
           inputFiles,
           deadlineMs: requestDeadlineMs,
         })
       : null;
     const pythonCode = autoValidation?.code || conversionResult.code;
+    const finalPipeline = autoValidation
+      ? reviewGeneratedConversion({
+          sasCode,
+          generatedCode: pythonCode,
+          language,
+          analysis: conversionResult.pipeline.sourceAnalysis,
+        })
+      : conversionResult.pipeline;
     const id = randomUUID();
     await execute(
       `INSERT INTO ${table(
@@ -844,7 +898,7 @@ export async function POST(request: Request) {
               createdAt: new Date().toISOString(),
             }))
           : [],
-        conversionPipeline: conversionResult.pipeline,
+        conversionPipeline: finalPipeline,
       },
       reusedExisting: Boolean(reusableExisting),
       autoValidation: autoValidation

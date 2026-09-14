@@ -353,6 +353,14 @@ function hasAny(text: string, patterns: RegExp[]) {
   return patterns.some((pattern) => pattern.test(text));
 }
 
+function extractProcedureSteps(source: string, procedure: string) {
+  const pattern = new RegExp(
+    `\\bproc\\s+${procedure}\\b[\\s\\S]*?(?:\\b(?:run|quit)\\s*;|(?=\\b(?:proc|data)\\s+)|$)`,
+    "gi",
+  );
+  return source.match(pattern) || [];
+}
+
 export function reviewGeneratedConversion(params: {
   sasCode: string;
   generatedCode: string;
@@ -367,15 +375,23 @@ export function reviewGeneratedConversion(params: {
     /\bproc\s+descript\b/i.test(source) &&
     /\bdeffmean\b/i.test(source) &&
     /\b(?:tinv|n_act\s*=\s*nsum)\b/i.test(source);
-  const sourceRequestsExcel = hasAny(source, [
-    /\bdbms\s*=\s*(?:excel|xlsx|xls)\b/i,
-    /\boutfile\s*=\s*["'][^"']+\.xlsx?["']/i,
-    /\bods\s+excel\b/i,
-  ]);
-  const sourceRequestsCsv = hasAny(source, [
-    /\bdbms\s*=\s*csv\b/i,
-    /\boutfile\s*=\s*["'][^"']+\.csv["']/i,
-  ]);
+  const exportSteps = extractProcedureSteps(source, "export");
+  const sourceRequestsExcel =
+    /\bods\s+excel\b/i.test(source) ||
+    exportSteps.some((step) =>
+      hasAny(step, [
+        /\bdbms\s*=\s*(?:excel|xlsx|xls)\b/i,
+        /\boutfile\s*=\s*["'][^"']+\.xlsx?["']/i,
+      ]),
+    );
+  const sourceRequestsCsv =
+    /\bods\s+csv\b/i.test(source) ||
+    exportSteps.some((step) =>
+      hasAny(step, [
+        /\bdbms\s*=\s*csv\b/i,
+        /\boutfile\s*=\s*["'][^"']+\.csv["']/i,
+      ]),
+    );
   const generatedWritesExcel =
     params.language === "PYTHON"
       ? hasAny(generated, [/\bExcelWriter\s*\(/i, /\.to_excel\s*\(/i])
@@ -498,7 +514,7 @@ export function reviewGeneratedConversion(params: {
       severity: "error",
       code: "missing_excel_output",
       message:
-        "The SAS source requests an Excel workbook, but the generated code does not appear to create one.",
+        "The SAS source requests an Excel output workbook, but the generated code does not appear to create one.",
     });
   }
 

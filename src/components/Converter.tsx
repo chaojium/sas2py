@@ -371,6 +371,12 @@ export default function Converter() {
   );
   const [forceRegenerate, setForceRegenerate] = useState(false);
   const [autoValidate, setAutoValidate] = useState(false);
+  const [outputCodeTheme, setOutputCodeTheme] = useState<"light" | "dark">(
+    "light",
+  );
+  const [executionOutputTheme, setExecutionOutputTheme] = useState<
+    "light" | "dark"
+  >("light");
   const sasLineNumberRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -388,12 +394,18 @@ export default function Converter() {
 
   const fetchEntries = useCallback(async () => {
     if (!isAuthed) return;
-    const response = await authFetch("/api/conversions");
-    if (!response.ok) return;
-    const { data } = await parseApiResponse<{
-      entries?: Entry[];
-    }>(response);
-    setEntries(data?.entries || []);
+    try {
+      const response = await authFetch("/api/conversions");
+      if (!response.ok) return;
+      const { data } = await parseApiResponse<{
+        entries?: Entry[];
+      }>(response);
+      if (data?.entries) {
+        setEntries(data.entries);
+      }
+    } catch (error) {
+      console.warn("Recent conversions could not be refreshed:", error);
+    }
   }, [isAuthed]);
 
   useEffect(() => {
@@ -485,6 +497,7 @@ export default function Converter() {
               autoValidate,
               additionalGuidance,
               referenceUrl,
+              inputFileNames: executionInputFiles.map((file) => file.name),
             }),
           });
       const { data, text } = await parseApiResponse<ConvertApiResponse>(
@@ -550,7 +563,7 @@ export default function Converter() {
       } else if (forceRegenerate) {
         setError("Generated a fresh translation by bypassing saved-result reuse.");
       }
-      await fetchEntries();
+      void fetchEntries();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Conversion failed.");
     } finally {
@@ -597,7 +610,7 @@ export default function Converter() {
         throw new Error(data?.error || "Review failed.");
       }
       setReviewDrafts((prev) => ({ ...prev, [entryId]: { summary: "", comments: "", rating: "" } }));
-      await fetchEntries();
+      void fetchEntries();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Review failed.");
     } finally {
@@ -641,7 +654,7 @@ export default function Converter() {
           ),
         );
       }
-      await fetchEntries();
+      void fetchEntries();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Enhancement failed.");
     } finally {
@@ -718,7 +731,7 @@ export default function Converter() {
       setExecuteResult(null);
       setExecuteResultOrigin(null);
       setExecuteError(null);
-      await fetchEntries();
+      void fetchEntries();
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Saving edited code failed.",
@@ -871,7 +884,7 @@ export default function Converter() {
         setExecuteResult(result);
         setExecuteResultOrigin(result ? "manual" : null);
       }
-      await fetchEntries();
+      void fetchEntries();
     } catch (err) {
       setExecuteError(err instanceof Error ? err.message : "Execution failed.");
     } finally {
@@ -1093,7 +1106,7 @@ export default function Converter() {
           ),
         );
       }
-      await fetchEntries();
+      void fetchEntries();
     } catch (err) {
       setError(
         err instanceof Error
@@ -1631,6 +1644,27 @@ export default function Converter() {
               </h3>
               {pythonCode ? (
                 <div className="flex items-center gap-3">
+                  <div
+                    className="flex rounded-lg border border-[var(--border)] p-0.5"
+                    role="group"
+                    aria-label="Output code color theme"
+                  >
+                    {(["light", "dark"] as const).map((theme) => (
+                      <button
+                        key={theme}
+                        type="button"
+                        onClick={() => setOutputCodeTheme(theme)}
+                        aria-pressed={outputCodeTheme === theme}
+                        className={`rounded-md px-2.5 py-1 text-xs capitalize transition ${
+                          outputCodeTheme === theme
+                            ? "bg-[var(--foreground)] text-[var(--background)]"
+                            : "text-[var(--muted)] hover:text-[var(--foreground)]"
+                        }`}
+                      >
+                        {theme}
+                      </button>
+                    ))}
+                  </div>
                   <button
                     onClick={() => {
                       if (isEditingCode) {
@@ -1675,7 +1709,11 @@ export default function Converter() {
             <div className="mt-3">
               {isEditingCode ? (
                 <textarea
-                  className="min-h-[320px] w-full rounded-2xl border border-[var(--border)] bg-white/80 p-4 font-mono text-sm shadow-inner focus:outline-none focus:ring-2 focus:ring-[var(--secondary)]"
+                  className={`min-h-[320px] w-full rounded-2xl border border-[var(--border)] p-4 font-mono text-sm shadow-inner focus:outline-none focus:ring-2 focus:ring-[var(--secondary)] ${
+                    outputCodeTheme === "light"
+                      ? "bg-white/80 text-[var(--foreground)]"
+                      : "bg-[#141312] text-[#f5f3ef]"
+                  }`}
                   value={pythonCode}
                   onChange={(event) => {
                     setPythonCode(event.target.value);
@@ -1695,6 +1733,7 @@ export default function Converter() {
                   maxHeight={320}
                   showLineNumbers
                   highlightedLines={highlightedCodeLines}
+                  theme={outputCodeTheme}
                 />
               )}
             </div>
@@ -1736,14 +1775,37 @@ export default function Converter() {
                   <h4 className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)]">
                     Execution output
                   </h4>
-                  <p className="text-xs text-[var(--muted)]">
-                    Exit code {executeResult.exitCode ?? "unknown"} in{" "}
-                    {executeResult.durationMs}ms
-                    {executeResult.timedOut ? " (timed out)" : ""}
-                    {executeResult.backend
-                      ? ` | backend: ${executeResult.backend}`
-                      : ""}
-                  </p>
+                  <div className="flex flex-wrap items-center justify-end gap-3">
+                    <div
+                      className="flex rounded-lg border border-[var(--border)] p-0.5"
+                      role="group"
+                      aria-label="Execution output color theme"
+                    >
+                      {(["light", "dark"] as const).map((theme) => (
+                        <button
+                          key={theme}
+                          type="button"
+                          onClick={() => setExecutionOutputTheme(theme)}
+                          aria-pressed={executionOutputTheme === theme}
+                          className={`rounded-md px-2.5 py-1 text-xs capitalize transition ${
+                            executionOutputTheme === theme
+                              ? "bg-[var(--foreground)] text-[var(--background)]"
+                              : "text-[var(--muted)] hover:text-[var(--foreground)]"
+                          }`}
+                        >
+                          {theme}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-xs text-[var(--muted)]">
+                      Exit code {executeResult.exitCode ?? "unknown"} in{" "}
+                      {executeResult.durationMs}ms
+                      {executeResult.timedOut ? " (timed out)" : ""}
+                      {executeResult.backend
+                        ? ` | backend: ${executeResult.backend}`
+                        : ""}
+                    </p>
+                  </div>
                 </div>
                 <div className="mt-3 space-y-3">
                   <div>
@@ -1789,6 +1851,7 @@ export default function Converter() {
                       language="text"
                       maxHeight={160}
                       wrapLongLines
+                      theme={executionOutputTheme}
                     />
                   </div>
                   <div>
@@ -1834,6 +1897,7 @@ export default function Converter() {
                       language="text"
                       maxHeight={160}
                       wrapLongLines
+                      theme={executionOutputTheme}
                     />
                   </div>
                   {executeResult.artifacts && executeResult.artifacts.length > 0 ? (
